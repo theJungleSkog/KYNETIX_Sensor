@@ -1,3 +1,5 @@
+#The python code that interprets the arduino data! - Dani
+
 """
 KYNETIX sensor logger: records the ESP32's output to a CSV file, shows a live graph,
 and saves a picture of the WHOLE run when you stop.
