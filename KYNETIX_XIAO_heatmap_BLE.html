@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101b30">
+<title>KYNETIX | FSR Foot Heatmap</title>
+<style>
+  * { box-sizing: border-box; }
+  :root { color-scheme: dark; font-family: system-ui, -apple-system, Segoe UI, Arial, sans-serif; }
+  body { background: #091321; color: #f2f5fd; margin: 0; padding: 20px 14px 32px; }
+  main { margin: 0 auto; max-width: 720px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+  .logo { font-size: 22px; font-weight: 800; letter-spacing: .15em; }
+  .subtitle { color: #91a9c1; font-size: 12px; margin-top: 4px; }
+  .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: #b4c1d4; padding: 8px 10px; border: 1px solid #33435c; border-radius: 20px; white-space: nowrap; }
+  .dot { display: inline-block; border-radius: 50%; width: 7px; height: 7px; background: #f0a657; }
+  .status.connected .dot { background: #4ed3a1; }
+  .panel { background: #121f33; border: 1px solid #25354e; border-radius: 18px; padding: 16px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 13px; }
+  button { background: #3e78ed; border: 0; color: white; font-weight: 700; font-size: 14px; border-radius: 10px; padding: 13px 15px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.secondary { background: #243955; color: #c8d8ee; }
+  .stats { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; margin: 12px 0; }
+  .stat { background: #0b182b; border: 1px solid #20324b; border-radius: 12px; padding: 12px 10px; }
+  .stat .label { font-size: 11px; color: #91a9c1; }
+  .stat .value { font-size: 22px; font-weight: 750; margin-top: 5px; font-variant-numeric: tabular-nums; }
+  .visual { display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, .8fr); align-items: center; gap: 4px; }
+  canvas { display: block; width: 100%; height: auto; max-height: 430px; object-fit: contain; }
+  .readings { display: flex; flex-direction: column; gap: 12px; }
+  .reading { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+  .reading span { color: #a6b8d0; }
+  .reading strong { font-variant-numeric: tabular-nums; }
+  .bar { background: #1f3450; height: 6px; border-radius: 20px; overflow: hidden; margin-top: 5px; }
+  .fill { height: 100%; width: 0%; background: linear-gradient(90deg,#4e9af6,#f4b144,#f24d50); border-radius: 20px; }
+  .legend { display: flex; align-items: center; gap: 10px; color: #91a9c1; font-size: 12px; }
+  .ramp { flex: 1; height: 8px; border-radius: 12px; background: linear-gradient(90deg,#3567cb,#33bbca,#f7bf4c,#f24d50); }
+  #error { color: #ffc6a3; font-size: 12px; line-height: 1.5; min-height: 0; margin-top: 8px; }
+  .hint { color: #94a8c0; font-size: 12px; line-height: 1.6; margin-top: 13px; }
+  @media (max-width: 390px) { .visual { grid-template-columns: minmax(0,1fr) minmax(115px,.8fr); } .panel{padding:12px;} .stat .value{font-size:18px;} }
+</style>
+</head>
+<body>
+<main>
+  <header><div><div class="logo">KYNETIX</div><div class="subtitle">XIAO nRF52840 · 5 FSR · live BLE heatmap</div></div><div id="status" class="status"><span class="dot"></span><span id="statusText">Disconnected</span></div></header>
+  <div class="controls">
+    <button id="connectBtn">Connect via Bluetooth</button>
+    <button id="disconnectBtn" class="secondary" disabled>Disconnect</button>
+    <button id="demoBtn" class="secondary">Try demo</button>
+  </div>
+  <section class="panel">
+    <div class="stats">
+      <div class="stat"><div class="label">Contact</div><div class="value" id="contact">—</div></div>
+      <div class="stat"><div class="label">Last GCT</div><div class="value" id="gct">—</div></div>
+      <div class="stat"><div class="label">Steps</div><div class="value" id="steps">0</div></div>
+    </div>
+    <div class="visual">
+      <canvas id="foot" width="270" height="490" role="img" aria-label="Five-sensor right-foot pressure heatmap"></canvas>
+      <div class="readings" id="readings"></div>
+    </div>
+    <div class="legend"><span>Low</span><div class="ramp"></div><span>High</span></div>
+    <div id="error" role="alert"></div>
+    <div class="hint">Readings are nominal baseline-subtracted millivolts, NOT calibrated force or pressure. S1–S5 match your XIAO USB firmware: heel, first metatarsal, fifth metatarsal, lateral midfoot, big toe. Confirm sensor placement before interpreting the heatmap. Adjust MAX_DISPLAY_MV for the color scale. On iPhone, Safari needs a Web Bluetooth extension (such as beacio); a Home Screen shortcut alone does not enable BLE.</div>
+  </section>
+</main>
+<script>
+'use strict';
+// Must exactly match KYNETIX_XIAO_nRF52840_BLE.ino
+const SERVICE_UUID = '719b8b50-0c90-4a49-9e87-f392ca56d401';
+const DATA_UUID = '719b8b51-0c90-4a49-9e87-f392ca56d401';
+const MAX_DISPLAY_MV = 1400;
+const names = ['Heel · S1', 'First met · S2', 'Fifth met · S3', 'Lat. midfoot · S4', 'Big toe · S5'];
+// Drawing positions ONLY. Confirm actual physical S1..S5 mapping before treating it as a true map.
+const locations = [
+  {x: 126, y: 404},  // S1 heel
+  {x: 105, y: 180},  // S2 first metatarsal
+  {x: 184, y: 185},  // S3 fifth metatarsal
+  {x: 160, y: 295},  // S4 lateral midfoot
+  {x: 93, y: 87}     // S5 big toe
+];
+const canvas = document.getElementById('foot');
+const ctx = canvas.getContext('2d');
+const scratch = document.createElement('canvas');
+scratch.width = 135; scratch.height = 245;
+const readingsEl = document.getElementById('readings');
+const statusEl = document.getElementById('status');
+const statusText = document.getElementById('statusText');
+const errorEl = document.getElementById('error');
+const connectBtn = document.getElementById('connectBtn');
+const disconnectBtn = document.getElementById('disconnectBtn');
+const demoBtn = document.getElementById('demoBtn');
+let device = null;
+let characteristic = null;
+let demoTimer = null;
+let lastFrame = {t: 0, values: [0,0,0,0,0], contact: 0, gct: 0, steps: 0};
+
+function setStatus(message, connected=false) {
+  statusText.textContent = message;
+  statusEl.classList.toggle('connected', connected);
+}
+function showError(message) { errorEl.textContent = message; }
+function footPath() {
+  const p = new Path2D();
+  p.moveTo(123, 42);
+  p.bezierCurveTo(103, 29, 79, 43, 69, 75);
+  p.bezierCurveTo(58, 113, 56, 162, 70, 208);
+  p.bezierCurveTo(79, 250, 72, 298, 77, 342);
+  p.bezierCurveTo(82, 409, 90, 454, 128, 458);
+  p.bezierCurveTo(169, 461, 190, 427, 183, 373);
+  p.bezierCurveTo(176, 330, 157, 302, 155, 275);
+  p.bezierCurveTo(161, 240, 203, 213, 214, 164);
+  p.bezierCurveTo(225, 131, 215, 86, 203, 66);
+  p.bezierCurveTo(189, 39, 171, 38, 161, 48);
+  p.bezierCurveTo(150, 28, 133, 29, 123, 42);
+  p.closePath(); return p;
+}
+function heatColor(x) {
+  // Dark-blue -> cyan -> yellow -> red
+  const stops = [[35,69,141],[37,161,218],[54,203,192],[253,186,70],[239,71,71]];
+  let s = Math.max(0, Math.min(0.9999, x)) * (stops.length - 1);
+  let i = Math.floor(s), a = s-i;
+  return stops[i].map((v,j)=>Math.round(v*(1-a)+stops[i+1][j]*a));
+}
+function drawHeatmap(values) {
+  const p = footPath();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#16283d'; ctx.fill(p);
+  ctx.save(); ctx.clip(p);
+  // Smooth interpolation from the five measured sensor locations.
+  // This is qualitative visualization, not a validated pressure distribution.
+  const w = 135, h = 245;
+  const pixels = ctx.createImageData(w,h);
+  for(let iy=0;iy<h;iy++) for(let ix=0;ix<w;ix++) {
+    let px=ix*2, py=iy*2, numerator=0, denom=0;
+    for(let k=0;k<5;k++) {
+      let dx=px-locations[k].x, dy=py-locations[k].y;
+      let weight=1/(dx*dx+dy*dy+1000);
+      numerator += weight*Math.min(1,values[k]/MAX_DISPLAY_MV);
+      denom += weight;
+    }
+    let x=numerator/denom;
+    let [r,g,b] = heatColor(x);
+    let off=4*(iy*w+ix);
+    pixels.data[off]=r; pixels.data[off+1]=g; pixels.data[off+2]=b; pixels.data[off+3]=255;
+  }
+  // Scale the 135x245 heat image to 270x490 without requiring external libraries.
+  scratch.getContext('2d').putImageData(pixels,0,0);
+  ctx.imageSmoothingEnabled=true;
+  ctx.drawImage(scratch,0,0,270,490);
+  ctx.restore();
+  ctx.strokeStyle = '#718aa7'; ctx.lineWidth=3; ctx.stroke(p);
+  locations.forEach((pt,i)=>{
+    const active = values[i] > 80;
+    ctx.beginPath();ctx.arc(pt.x,pt.y,7,0,2*Math.PI);
+    ctx.fillStyle=active?'#ffffff':'#a2b1c8';ctx.fill();
+    ctx.lineWidth=2;ctx.strokeStyle='#0e253c';ctx.stroke();
+  });
+}
+function update(frame) {
+  lastFrame=frame;
+  document.getElementById('contact').textContent=frame.contact?'YES':'NO';
+  document.getElementById('gct').textContent=frame.steps?`${frame.gct} ms`:'—';
+  document.getElementById('steps').textContent=frame.steps;
+  for(let i=0;i<5;i++) {
+    document.getElementById(`v${i}`).textContent=`${frame.values[i]} mV`;
+    document.getElementById(`bar${i}`).style.width=`${Math.min(100,100*frame.values[i]/MAX_DISPLAY_MV)}%`;
+  }
+  drawHeatmap(frame.values);
+}
+function onNotification(event) {
+  const d = event.target.value; // DataView
+  if (d.byteLength !== 19) { showError(`Unexpected BLE payload (${d.byteLength} bytes). Expected 19.`); return; }
+  const values=Array.from({length:5},(_,i)=>d.getUint16(4+2*i,true));
+  update({t:d.getUint32(0,true),values,contact:d.getUint8(14),gct:d.getUint16(15,true),steps:d.getUint16(17,true)});
+}
+function onDisconnected() {
+  characteristic=null;
+  connectBtn.disabled=false;
+  disconnectBtn.disabled=true;
+  setStatus('Disconnected');
+}
+async function connectBLE() {
+  clearInterval(demoTimer); demoTimer=null; demoBtn.textContent='Try demo';
+  if (!navigator.bluetooth) {
+    showError('Web Bluetooth unavailable. For iPhone Safari, install/enable a compatible Web Bluetooth extension (such as beacio) and open this HTTPS page in Safari. A Home Screen standalone web app may not have extension access. Android Chrome supports Web Bluetooth.');
+    return;
+  }
+  try {
+    showError('');
+    device=await navigator.bluetooth.requestDevice({filters:[{name:'KYNETIX-FSR'}],optionalServices:[SERVICE_UUID]});
+    device.addEventListener('gattserverdisconnected',onDisconnected);
+    setStatus('Connecting…');
+    const server=await device.gatt.connect();
+    const service=await server.getPrimaryService(SERVICE_UUID);
+    characteristic=await service.getCharacteristic(DATA_UUID);
+    characteristic.addEventListener('characteristicvaluechanged',onNotification);
+    await characteristic.startNotifications();
+    connectBtn.disabled=true;
+    disconnectBtn.disabled=false;
+    setStatus('Live BLE',true);
+  } catch(e) {
+    showError(`Bluetooth connection failed: ${e.message || e}`);
+    setStatus('Disconnected');
+  }
+}
+function disconnectBLE(){ if(device?.gatt?.connected)device.gatt.disconnect(); else onDisconnected(); }
+function toggleDemo(){
+  if(demoTimer){ clearInterval(demoTimer);demoTimer=null;demoBtn.textContent='Try demo';setStatus('Disconnected');return; }
+  disconnectBLE();
+  let t=0, n=0;
+  demoBtn.textContent='Stop demo'; setStatus('Demo data',true);
+  demoTimer=setInterval(()=>{
+    t+=40;
+    const phase=(t%850)/850;
+    const active=phase<0.60;
+    if(t%850<40)n++;
+    const weight=active ? Math.sin(Math.PI*phase/.60) : 0;
+    const vals=[800,500,1000,650,720].map((v,i)=>Math.max(0,Math.round(weight*v+Math.sin(t/230+i)*22)));
+    update({t,values:vals,contact:active?1:0,gct:510,steps:n});
+  },40);
+}
+for(let i=0;i<5;i++) {
+  const outer=document.createElement('div');
+  outer.innerHTML=`<div class="reading"><span>${names[i]}</span><strong id="v${i}">0 mV</strong></div><div class="bar"><div class="fill" id="bar${i}"></div></div>`;
+  readingsEl.appendChild(outer);
+}
+connectBtn.addEventListener('click',connectBLE);
+disconnectBtn.addEventListener('click',disconnectBLE);
+demoBtn.addEventListener('click',toggleDemo);
+update(lastFrame);
+</script>
+</body>
+</html>
