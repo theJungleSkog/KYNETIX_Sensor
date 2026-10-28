@@ -5,8 +5,7 @@
 #include "BluetoothSerial.h"
 BluetoothSerial SerialBT;
 #define OUT SerialBT            // change to Serial to send over the USB cable instead
-
-const int PINS[]    = {32, 33, 34, 35, 36};          // S1 D32, S2 D33, S3 D34, S4 D35, S5 VP
+const int PINS[]    = {32, 39, 34, 35, 36};      // S1 D32, S2 D33, S3 D34, S4 D35, S5 VP
 const char* NAMES[] = {"S1", "S2", "S3", "S4", "S5"};
 const int N = 5;
 const int LED = 2;                                   // onboard blue LED on most DevKits
