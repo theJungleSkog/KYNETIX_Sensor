@@ -1,0 +1,160 @@
+// KYNETIX live capacitance viewer (single sensor on CIN1).
+// XIAO nRF52840 + FDC1004. Wiring: 3V3->3.3V, GND->GND, D4->SDA, D5->SCL,
+// CIN1 -> sensor upper plate, lower plate -> GND.
+//
+// Open Tools > Serial Plotter (graph) or Serial Monitor (numbers), 115200 baud.
+// Prints ~50 lines/s:  Cap_pF:<absolute>,Delta_pF:<change from zero>
+// Send 'z' (type z + Enter in the Serial Monitor) to re-zero the delta.
+// Zero is also taken automatically at power-up, so start with the sensor at rest.
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <math.h>
+
+const uint8_t FDC_ADDR = 0x50;
+const uint8_t RATE_CODE = 3;  // 400 S/s
+const uint8_t REG_FDC_CONFIG = 0x0C;
+const uint16_t DONE_1_MASK = 0x0008;
+const uint16_t REPEAT_CH1_CONFIG = ((uint16_t)RATE_CODE << 10) | (1U << 8) | (1U << 7);
+const float COUNTS_PER_PF = 524288.0f;
+const float CAPDAC_STEP_PF = 3.125f;
+const float VALID_RESIDUAL_LIMIT_PF = 14.9f;
+const uint32_t PRINT_INTERVAL_MS = 20;  // 50 Hz display
+
+uint8_t capdac = 0;
+float baselinePF = 0.0f;
+float latestPF = 0.0f;
+bool haveSample = false;
+
+bool writeReg(uint8_t reg, uint16_t value) {
+  Wire.beginTransmission(FDC_ADDR);
+  Wire.write(reg);
+  Wire.write((uint8_t)(value >> 8));
+  Wire.write((uint8_t)value);
+  return Wire.endTransmission() == 0;
+}
+
+bool readReg(uint8_t reg, uint16_t &value) {
+  Wire.beginTransmission(FDC_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(true) != 0) return false;
+  if (Wire.requestFrom(FDC_ADDR, (uint8_t)2) != 2) return false;
+  uint16_t hi = (uint8_t)Wire.read();
+  uint16_t lo = (uint8_t)Wire.read();
+  value = (hi << 8) | lo;
+  return true;
+}
+
+int32_t decodeResult(uint16_t msb, uint16_t lsb) {
+  uint32_t bits = ((uint32_t)msb << 8) | (lsb >> 8);
+  return (bits & 0x800000U) ? (int32_t)bits - 16777216L : (int32_t)bits;
+}
+
+bool configureSensor() {
+  return writeReg(0x08, (4U << 10) | ((uint16_t)capdac << 5));
+}
+
+bool readOne(float &residualPF) {
+  if (!writeReg(REG_FDC_CONFIG, ((uint16_t)RATE_CODE << 10) | 0x0080U)) return false;
+  uint32_t startMS = millis();
+  while (true) {
+    uint16_t status;
+    if (!readReg(REG_FDC_CONFIG, status)) return false;
+    if (status & DONE_1_MASK) break;
+    if (millis() - startMS >= 50) return false;
+    delay(1);
+  }
+  uint16_t msb, lsb;
+  if (!readReg(0x00, msb) || !readReg(0x01, lsb)) return false;
+  residualPF = decodeResult(msb, lsb) / COUNTS_PER_PF;
+  return isfinite(residualPF);
+}
+
+bool tuneOffset() {
+  capdac = 0;
+  for (int i = 0; i < 64; i++) {
+    if (!configureSensor()) return false;
+    float r;
+    if (!readOne(r)) return false;
+    if (r > 4.0f && capdac < 31) { capdac++; continue; }
+    if (r < -4.0f && capdac > 0) { capdac--; continue; }
+    return fabsf(r) < VALID_RESIDUAL_LIMIT_PF;
+  }
+  return false;
+}
+
+// Re-init the chip, tune offset, take the zero, start continuous measurement.
+bool setupSensor() {
+  uint16_t man, dev;
+  if (!readReg(0xFE, man) || !readReg(0xFF, dev) || man != 0x5449 || dev != 0x1004) {
+    Serial.println("# FDC1004 not detected, check wiring");
+    return false;
+  }
+  writeReg(REG_FDC_CONFIG, 0x8000);  // reset
+  delay(10);
+  if (!tuneOffset()) {
+    Serial.println("# Offset tuning failed (sensor out of range?)");
+    return false;
+  }
+  double sum = 0;
+  int good = 0;
+  for (int i = 0; i < 100; i++) {
+    float r;
+    if (readOne(r) && fabsf(r) < VALID_RESIDUAL_LIMIT_PF) {
+      sum += r + capdac * CAPDAC_STEP_PF;
+      good++;
+    }
+  }
+  if (good < 80) {
+    Serial.println("# Zeroing failed");
+    return false;
+  }
+  baselinePF = (float)(sum / good);
+  writeReg(REG_FDC_CONFIG, REPEAT_CH1_CONFIG);
+  Serial.println("# Running. Zero taken.");
+  return true;
+}
+
+bool sensorOK = false;
+uint32_t lastPrintMS = 0;
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial && millis() < 5000) delay(10);
+  Wire.begin();
+  Wire.setClock(400000);
+  sensorOK = setupSensor();
+}
+
+void loop() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == 'z' || c == 'Z') sensorOK = setupSensor();
+  }
+
+  if (!sensorOK) {
+    delay(2000);
+    sensorOK = setupSensor();  // keep retrying
+    return;
+  }
+
+  uint16_t status;
+  if (readReg(REG_FDC_CONFIG, status) && (status & DONE_1_MASK)) {
+    uint16_t msb, lsb;
+    if (readReg(0x00, msb) && readReg(0x01, lsb)) {
+      float r = decodeResult(msb, lsb) / COUNTS_PER_PF;
+      if (isfinite(r) && fabsf(r) < VALID_RESIDUAL_LIMIT_PF) {
+        latestPF = r + capdac * CAPDAC_STEP_PF;
+        haveSample = true;
+      }
+    }
+  }
+
+  if (haveSample && millis() - lastPrintMS >= PRINT_INTERVAL_MS) {
+    lastPrintMS = millis();
+    Serial.print("Cap_pF:");
+    Serial.print(latestPF, 4);
+    Serial.print(",Delta_pF:");
+    Serial.println(latestPF - baselinePF, 4);
+  }
+}
