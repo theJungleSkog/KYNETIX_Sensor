@@ -1,0 +1,550 @@
+<!doctype html>
+<!--
+  KYNETIX / LIVE GAIT ANALYSIS / SINGLE-FILE PROTOTYPE
+  Open locally in Chrome or Edge to connect a XIAO nRF52840 Sense over USB Web Serial.
+  Expected Arduino MODE=2: t_ms,S1,S2,S3,S4,S5,contact @ 115200 baud.
+  Physical signal pins: S1 A0, S2 A1, S3 A2, S4 A3, S5 A4.
+  Sensor channel mapping: S1 big toe; S2 lateral midfoot; S3 fifth metatarsal; S4 first metatarsal; S5 heel.
+  All heat-map values are relative analog millivolts; no calibrated pressure.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#071219">
+<title>Kynetix | Live Gait Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ============================ KYNETIX DESIGN TOKENS ============================ */
+:root{
+  --bg:#071219;--surface:#102027;--surface2:#142830;--surface3:#192f37;
+  --line:#27414a;--line2:#34545d;--text:#f0f8f6;--muted:#90abb3;
+  --accent:#bdef67;--cyan:#54d9d0;--amber:#fac36b;--red:#ff805f;--shadow:rgba(0,0,0,.15);
+}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0;color:var(--text);background:radial-gradient(ellipse 70% 45% at 88% 0%,#18343a 0%,transparent 70%),var(--bg);font-family:'DM Sans',Inter,system-ui,sans-serif;font-size:14px;min-height:100vh}
+button,a{font:inherit}
+button{cursor:pointer;transition:background .16s,border-color .16s,transform .16s}
+button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+button:disabled{opacity:.55;cursor:not-allowed}
+/* ============================ HEADER & NAV ============================ */
+.shell{max-width:1500px;margin:auto;padding:0 34px}
+.topbar{border-bottom:1px solid var(--line);background:#09171cdd}
+.topbar .shell{height:94px;display:flex;align-items:center;justify-content:space-between;gap:18px}
+.brandgroup{display:flex;align-items:center;gap:17px;min-width:0}
+.brandicon{width:49px;height:49px;flex:none}
+.wordmark{font-family:'Barlow Condensed','Arial Narrow',sans-serif;font-size:33px;font-weight:800;line-height:.9;letter-spacing:.13em}
+.brandtag{font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.21em;text-transform:uppercase;margin-top:9px}
+.topcontrols{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;gap:10px}
+.status{border:1px solid var(--line);background:#0e2027;padding:10px 13px;border-radius:100px;display:flex;align-items:center;gap:8px;color:#afc5c9;font-size:12px;white-space:nowrap}
+.statusdot{width:8px;height:8px;border-radius:50%;background:#647780;flex:none}
+.status.live .statusdot{background:var(--accent);box-shadow:0 0 0 4px #bdef6721,0 0 15px #bdef6777}
+.status.demo .statusdot{background:var(--cyan);box-shadow:0 0 0 4px #54d9d021}
+.status.error .statusdot{background:var(--red)}
+.btn{border:1px solid #31505a;color:var(--text);background:#152a32;border-radius:8px;padding:11px 15px;font-size:12px;font-weight:700;white-space:nowrap}
+.btn:hover{border-color:#7cabb0;background:#1b3540}
+.btn.primary{background:var(--accent);color:#071219;border-color:var(--accent)}
+.btn.primary:hover{background:#d1ff8a}
+.btn.export{color:var(--accent);border-color:#5c8061;background:#142a28}
+.btn:disabled:hover{background:#142a28}
+.intro{padding-top:30px;padding-bottom:25px;display:flex;justify-content:space-between;align-items:end;gap:24px;flex-wrap:wrap}
+.eyebrow{color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.23em;font-size:10px}
+.intro h1{font:700 clamp(38px,4.5vw,60px)/1.03 'Barlow Condensed','Arial Narrow',sans-serif;letter-spacing:.015em;margin:7px 0 7px}
+.intro p{margin:0;color:var(--muted);font-size:13px;line-height:1.6;max-width:650px}
+.session{display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:var(--muted);font-size:12px}
+.pill{padding:7px 11px;border:1px solid var(--line);border-radius:40px;background:#10232a;color:#abc0c6;font-size:11px;font-weight:700;letter-spacing:.03em}
+.pill b{color:var(--text)}
+/* ============================ DASHBOARD LAYOUT ============================ */
+.layout{display:grid;grid-template-columns:minmax(360px,.95fr) minmax(490px,1.05fr);gap:20px;padding-bottom:20px}
+.panel{border:1px solid var(--line);background:linear-gradient(155deg,#12232a 0%,#0e1c24 100%);border-radius:15px;box-shadow:0 14px 28px var(--shadow);min-width:0}
+.panelhead{display:flex;justify-content:space-between;align-items:start;gap:10px;margin-bottom:12px}
+.kicker{font-size:11px;letter-spacing:.15em;text-transform:uppercase;font-weight:700;color:#a8bfc2}
+.helper{font-size:11px;color:var(--muted);line-height:1.5}
+.panelhead h2{font-size:18px;letter-spacing:-.02em;margin:5px 0 0;font-weight:700}
+.footpanel{padding:24px 25px 13px;position:relative;overflow:hidden}
+.footpanel:before{content:'';width:190px;height:190px;background:radial-gradient(circle,#345d5048,transparent 70%);position:absolute;left:-80px;bottom:40px;pointer-events:none}
+.mapheadmark{border:1px solid var(--line);padding:7px 10px;border-radius:7px;color:var(--muted);font-size:11px;white-space:nowrap}
+.footmap{display:block;width:100%;max-width:640px;margin:auto;height:auto;max-height:615px}
+.mapfoot{fill:#192b30;stroke:#42616a;stroke-width:2.1}
+.mapgrid{stroke:#33515a;stroke-width:.7;opacity:.55;stroke-dasharray:4 7}
+.bottomnote{display:flex;align-items:start;gap:9px;border-top:1px solid var(--line);padding:15px 2px 5px;color:var(--muted);line-height:1.55;font-size:11px}
+.bottomnote .info{width:16px;height:16px;flex:none;border:1px solid #718e92;color:#a5c5c9;text-align:center;line-height:14px;border-radius:50%;font-weight:700}
+.right{display:flex;flex-direction:column;gap:18px;min-width:0}
+.gctpanel{padding:25px 27px 22px}
+.metricline{display:flex;justify-content:space-between;align-items:end;gap:12px;flex-wrap:wrap}
+.big{font-family:'Barlow Condensed','Arial Narrow',sans-serif;font-size:clamp(81px,8vw,118px);font-weight:700;line-height:.91;letter-spacing:-.024em;font-variant-numeric:tabular-nums;margin-top:8px}
+.big small{font:600 26px 'Barlow Condensed','Arial Narrow',sans-serif;color:var(--muted);margin-left:7px;letter-spacing:.01em}
+.latest{border:1px solid var(--line);border-radius:9px;padding:9px 12px;min-width:115px;margin-bottom:7px}
+.latest div:first-child{font-size:10px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}
+.latest div:last-child{font-weight:700;margin-top:6px;color:var(--cyan)}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:24px}
+.stat{border:1px solid #2a444e;border-radius:10px;background:#152932;padding:13px 14px;min-width:0}
+.stat .value{font:700 clamp(32px,3.7vw,47px)/1 'Barlow Condensed','Arial Narrow',sans-serif;margin:9px 0 4px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.stat .value small{font:600 16px 'Barlow Condensed',sans-serif;margin-left:3px;color:var(--muted)}
+.stat .helper{font-size:10px}
+.twoCol{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.95fr);gap:18px}
+.smallpanel{padding:20px 21px;min-height:185px}
+.strikebig{font:700 32px 'Barlow Condensed','Arial Narrow',sans-serif;margin:10px 0 5px}
+.strike{display:flex;width:100%;height:10px;border-radius:30px;overflow:hidden;background:#274048;margin:17px 0 10px}
+.strike>div{min-width:0;transition:flex .4s}
+.legend{display:flex;align-items:center;gap:9px;flex-wrap:wrap;color:var(--muted);font-size:10px}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.legend i{width:6px;height:6px;border-radius:50%;display:inline-block}
+.spark{height:78px;width:100%;margin-top:8px;display:block}
+.sparksub{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;margin-top:2px}
+.sensorpanel{padding:21px 23px 20px}
+.sensorlist{display:flex;flex-direction:column;gap:15px;margin-top:20px}
+.sensorrow{display:grid;grid-template-columns:132px minmax(0,1fr) 70px;gap:10px;align-items:center;font-size:12px}
+.sensorname{font-weight:700;color:var(--text);font-size:12px}
+.sensorname small{display:block;font-size:10px;color:var(--muted);font-weight:500;margin-top:4px}
+.sensorbar{height:9px;position:relative;background:#263d44;border-radius:100px;overflow:hidden}
+.sensorfill{width:0;height:100%;border-radius:100px;background:linear-gradient(90deg,#357978,#52d7c6,#bdef67);transition:width .15s}
+.sensorreading{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
+.sensorreading small{display:block;color:var(--muted);font-size:10px;font-weight:500;margin-top:3px}
+.graphpanel{padding:21px 23px 17px}
+.graphlegend{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px}
+.graphlegend .swatch{width:14px;height:3px;background:var(--accent);border-radius:3px}
+#trace{width:100%;height:128px;display:block;margin-top:14px}
+.graphaxis{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;margin-top:3px}
+.footnote{padding:0 2px 28px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;color:#75919a;font-size:11px;line-height:1.7}
+.msg{background:#1b2a2e;border:1px solid #4b696f;border-radius:8px;color:#b9d2d1;font-size:12px;padding:10px 13px;margin-bottom:18px;line-height:1.5}
+.msg:empty{display:none}
+/* ============================ EXPANDABLE SETUP NOTES ============================ */
+.setupGuide{border:1px solid var(--line);border-radius:12px;background:#102027;margin-bottom:18px;color:var(--text)}
+.setupGuide summary{padding:15px 20px;cursor:pointer;font-weight:700;font-size:12px;letter-spacing:.02em;list-style:none;display:flex;justify-content:space-between;gap:15px}
+.setupGuide summary::-webkit-details-marker{display:none}
+.setupGuide summary:after{content:'+';font-size:18px;color:var(--accent);font-weight:500}
+.setupGuide[open] summary:after{content:'−'}
+.setupGuide summary span{color:var(--muted);font-weight:400;margin-left:auto}
+.setupGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 24px;border-top:1px solid var(--line);padding:18px 20px 20px}
+.setupGrid strong{color:var(--accent);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.setupGrid p{color:var(--muted);font-size:12px;line-height:1.65;margin:7px 0 0}
+.setupGrid code{font-size:11px;color:#dff5ea}
+@media(max-width:650px){.setupGrid{grid-template-columns:1fr}.setupGuide summary span{display:none}}
+/* ============================ RESPONSIVE BREAKPOINTS ============================ */
+@media(max-width:1180px){.layout{grid-template-columns:minmax(310px,.9fr) minmax(420px,1.1fr)}.shell{padding:0 20px}.twoCol{grid-template-columns:1fr}.smallpanel{min-height:0}}
+@media(max-width:900px){.layout{grid-template-columns:1fr}.footmap{max-height:510px}.twoCol{grid-template-columns:repeat(2,minmax(0,1fr))}.topbar .shell{height:auto;min-height:85px;padding-top:15px;padding-bottom:15px}.intro{padding-top:23px}}
+@media(max-width:560px){.shell{padding:0 12px}.topbar .shell{align-items:flex-start;flex-direction:column}.topcontrols{justify-content:flex-start}.wordmark{font-size:27px}.brandicon{height:42px;width:42px}.intro h1{font-size:41px}.layout{gap:12px}.footpanel,.gctpanel,.smallpanel,.sensorpanel,.graphpanel{padding:17px}.twoCol{grid-template-columns:1fr;gap:12px}.sensorrow{grid-template-columns:105px 1fr 65px}.stat{padding:10px 8px}.stats{gap:6px}.stat .value{font-size:33px}.stat .helper{font-size:9px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="shell">
+    <div class="brandgroup">
+      <svg class="brandicon" viewBox="0 0 48 48" role="img" aria-label="Kynetix stylized K mark"><rect width="48" height="48" rx="12" fill="#bdef67"/><path d="M13 12v24M32 12 20 24l13 12" fill="none" stroke="#071219" stroke-width="5.5" stroke-linejoin="round" stroke-linecap="square"/></svg>
+      <div><div class="wordmark">KYNETIX</div><div class="brandtag">Run science / Prototype Lab</div></div>
+    </div>
+    <div class="topcontrols">
+      <div class="status" id="statusBox" role="status"><span class="statusdot"></span><span id="statusText">Not connected</span></div>
+      <button class="btn primary" id="btnBLE">Connect Bluetooth</button>
+      <button class="btn" id="btnConnect">Connect USB</button>
+      <button class="btn" id="btnDemo">Demo mode</button>
+      <button class="btn" id="btnReset">Reset</button>
+      <button class="btn export" id="btnExport" disabled>Export CSV ↓</button>
+    </div>
+  </div>
+</header>
+<div class="shell">
+  <div class="intro">
+    <div><div class="eyebrow">Movement, made measurable</div><h1>Live Gait Analysis</h1><p>Real-time ground-contact monitoring and five-point insole sensing, built for Kynetix prototype testing.</p></div>
+    <div class="session"><span class="pill">DEVICE <b>XIAO nRF52840 · BLE / USB</b></span><span class="pill">SENSORS <b>05 / ADC</b></span><span class="pill">STREAM <b id="sampleRate">-- Hz</b></span></div>
+  </div>
+  <div id="message" class="msg" role="alert"></div>
+  <main class="layout">
+    <section class="panel footpanel">
+      <div class="panelhead"><div><div class="kicker">01 / Sensor visualization</div><h2>Live insole map</h2></div><div class="mapheadmark">Signal above 200 mV noise floor</div></div>
+      <svg class="footmap" viewBox="0 0 540 575" role="img" aria-label="Insole with sensor indicators. S1 at big toe, S2 at lateral midfoot, S3 at fifth metatarsal, S4 at first metatarsal and S5 at heel.">
+        <defs>
+          <clipPath id="soleClip"><path d="M220 540 C175 540 160 510 162 470 C164 420 180 380 182 340 C184 300 150 260 148 200 C146 130 170 65 215 60 C260 56 300 120 298 200 C296 280 285 350 280 400 C276 450 282 490 275 515 C268 535 245 540 220 540 Z"/></clipPath>
+          <filter id="heatBlur" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="17"/></filter>
+          <linearGradient id="soleShade" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#254047"/><stop offset="1" stop-color="#12232a"/></linearGradient>
+        </defs>
+        <path class="mapfoot" d="M220 540 C175 540 160 510 162 470 C164 420 180 380 182 340 C184 300 150 260 148 200 C146 130 170 65 215 60 C260 56 300 120 298 200 C296 280 285 350 280 400 C276 450 282 490 275 515 C268 535 245 540 220 540 Z" fill="url(#soleShade)"/>
+        <g clip-path="url(#soleClip)"><g id="heat" filter="url(#heatBlur)"></g></g>
+        <path d="M180 287Q217 305 287 282M166 419Q224 439 277 420M166 166Q216 190 292 170" fill="none" class="mapgrid"/>
+        <g id="sensorNodes"></g>
+        <text x="222" y="36" fill="#87a8a9" font-size="12" font-family="'DM Sans',sans-serif" text-anchor="middle" letter-spacing="3">TOE</text>
+        <text x="222" y="566" fill="#87a8a9" font-size="12" font-family="'DM Sans',sans-serif" text-anchor="middle" letter-spacing="3">HEEL</text>
+      </svg>
+      <div class="bottomnote"><span class="info">i</span><span>Map values show sensor signals above the 200 mV display noise floor; the diagnostic panel retains the unfiltered baseline-adjusted readings. Heat colors are normalized separately for each sensor. They are <strong>not</strong> calibrated pressure, force, or a continuous plantar-pressure measurement.</span></div>
+    </section>
+    <div class="right">
+      <section class="panel gctpanel">
+        <div class="kicker">02 / Primary running metric</div>
+        <div class="metricline"><div><div class="helper" style="margin-top:10px">Ground contact time · last valid step</div><div class="big"><span id="gct">--</span><small>ms</small></div></div><div class="latest"><div>Current phase</div><div id="phase">Waiting for data</div></div></div>
+        <div class="stats">
+          <div class="stat"><div class="kicker">Avg · last 10</div><div class="value"><span id="avg">--</span><small>ms</small></div><div class="helper">Completed steps</div></div>
+          <div class="stat"><div class="kicker">Cadence · est.</div><div class="value"><span id="cad">--</span><small>spm</small></div><div class="helper">One-foot stride × 2</div></div>
+          <div class="stat"><div class="kicker">Valid steps</div><div class="value" id="steps">0</div><div class="helper">≥ 80 ms contact</div></div>
+        </div>
+      </section>
+      <div class="twoCol">
+        <section class="panel smallpanel"><div class="kicker">03 / Foot-strike estimate</div><div class="strikebig" id="strikeNow">--</div><div class="helper">First active sensor · latest step</div><div class="strike" aria-label="Strike distribution over last 20 steps"><div id="sbHeel" style="flex:1;background:#55dad1"></div><div id="sbMid" style="flex:1;background:#fac36b"></div><div id="sbFore" style="flex:1;background:#bdef67"></div></div><div class="legend"><span><i style="background:#55dad1"></i>Heel</span><span><i style="background:#fac36b"></i>Mid</span><span><i style="background:#bdef67"></i>Fore</span></div><div class="helper" style="margin-top:10px">Approximate classification from sparse sensing.</div></section>
+        <section class="panel smallpanel"><div class="kicker">04 / Contact-time history</div><svg class="spark" viewBox="0 0 260 78" preserveAspectRatio="none" id="gctSpark" aria-label="Recent contact time trend"><path d="M0 68H260" stroke="#29444e" stroke-width="1"/><text x="130" y="37" text-anchor="middle" fill="#68898f" font-size="11">Waiting for steps</text></svg><div class="sparksub"><span>Older</span><span id="trendLabel">Last 10 steps</span><span>Latest</span></div><div class="helper" style="margin-top:8px">Trend only; no performance judgment from GCT alone.</div></section>
+      </div>
+      <section class="panel sensorpanel"><div class="panelhead"><div><div class="kicker">05 / Channel diagnostics</div><h2>Sensor signals</h2></div><span class="helper">Live signal / last-step duration</span></div><div class="sensorlist" id="sensorList"></div></section>
+      <section class="panel graphpanel"><div class="panelhead"><div><div class="kicker">06 / Signal timeline</div><h2>Combined sensor signal</h2></div><div class="graphlegend"><span class="swatch"></span>Signal sum · mV</div></div><canvas id="trace" aria-label="Combined sensor signal over the last five seconds"></canvas><div class="graphaxis"><span>5 seconds ago</span><span>Now</span></div><div class="helper" id="hint" style="margin-top:12px">Upload Kynetix_XIAO_BLE_USB.ino, leave sensors unloaded for two seconds after power-on, then select Connect Bluetooth (Chrome or Edge). USB fallback is also available.</div></section>
+    </div>
+  </main>
+  <details class="setupGuide">
+    <summary>Connection &amp; sensor setup <span>XIAO nRF52840 / five FSR inputs</span></summary>
+    <div class="setupGrid">
+      <div><strong>1 / Prepare the device</strong><p>Upload <code>Kynetix_XIAO_BLE_USB.ino</code> using the Seeed nRF52 mbed-enabled core and ArduinoBLE library. The pins are <code>{A0, A1, A2, A3, A4}</code>. Power up with sensors unloaded for the first two seconds.</p></div>
+      <div><strong>2 / Connect the stream</strong><p>Use Chrome or Edge on a Bluetooth-equipped computer. Press <em>Connect Bluetooth</em> and choose <code>Kynetix Insole</code>. For USB fallback, close Serial Monitor and press <em>Connect USB</em>. If browser Bluetooth is blocked on a local file, serve this HTML from localhost.</p></div>
+      <div><strong>3 / Verify sensor placement</strong><p>S1 big toe (A0/D0) · S2 lateral midfoot (A1/D1) · S3 fifth metatarsal (A2/D2) · S4 first metatarsal (A3/D3) · S5 heel (A4/D4).</p></div>
+      <div><strong>4 / Interpret correctly</strong><p>Heat-map colors and channel bars reflect approximate baseline-adjusted sensor voltage (not calibrated pressure). GCT comes from the Arduino contact flag. Foot-strike and cadence are preliminary estimates, not medical advice.</p></div>
+    </div>
+  </details>
+  <footer class="footnote"><span>KYNETIX / PROTOTYPE ANALYTICS — FOR ENGINEERING TESTING, NOT CLINICAL DIAGNOSIS</span><span>CSV stream: t_ms, S1, S2, S3, S4, S5, contact · BLE or USB · recent ~5 min</span></footer>
+</div>
+<script>
+'use strict';
+// ============================ SENSOR & FIRMWARE CONFIG ============================
+// Stream S1-S5 indices and XIAO pins stay unchanged; labels, positions and regions match physical sensor placement.
+const SENSORS = [
+  {id:'S1', name:'Big toe',        region:'fore', pin:'A0', x:192,y:105, lx:345,ly:103},
+  {id:'S2', name:'Lat. midfoot',   region:'mid',  pin:'A1', x:262,y:324, lx:345,ly:335},
+  {id:'S3', name:'5th met',        region:'fore', pin:'A2', x:272,y:210, lx:345,ly:250},
+  {id:'S4', name:'1st met',        region:'fore', pin:'A3', x:178,y:200, lx:345,ly:174},
+  {id:'S5', name:'Heel',           region:'heel', pin:'A4', x:220,y:482, lx:345,ly:475}
+];
+const N=SENSORS.length;
+// Firmware MODE=2 provides the authoritative per-foot ground-contact flag:
+// total-load ON=150mV, OFF=75mV. These thresholds are fallback for MODE=0/demo.
+const TOTAL_ON=150,TOTAL_OFF=75;
+// Per-sensor thresholds are solely for sensor-specific durations and first-touch estimation.
+// Experimental crosstalk/noise rejection. These are NOT pressure calibration values.
+const SENSOR_ON=250,SENSOR_OFF=150,NOISE_FLOOR_MV=200,MIN_STEP_MS=80;
+const $=id=>document.getElementById(id), NS='http://www.w3.org/2000/svg';
+function svg(tag,attrs,parent){const n=document.createElementNS(NS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);if(parent)parent.appendChild(n);return n;}
+const nodes=SENSORS.map(s=>{
+  const heat=svg('circle',{cx:s.x,cy:s.y,r:32,fill:'#54d9d0',opacity:0},$('heat'));
+  const g=$('sensorNodes');
+  svg('line',{x1:s.x+12,y1:s.y,x2:s.lx-11,y2:s.ly,stroke:'#42616a','stroke-width':1,'stroke-dasharray':'3 5'},g);
+  const ring=svg('circle',{cx:s.x,cy:s.y,r:13,fill:'#1a3034',stroke:'#64838a','stroke-width':2},g);
+  const core=svg('circle',{cx:s.x,cy:s.y,r:6,fill:'#49616a'},g);
+  const name=svg('text',{x:s.lx,y:s.ly-5,fill:'#c9e2e1','font-size':14,'font-family':'DM Sans, sans-serif','font-weight':700},g);name.textContent=s.id+' · '+s.name;
+  const reading=svg('text',{x:s.lx,y:s.ly+19,fill:'#86a6ac','font-size':22,'font-family':'Barlow Condensed, sans-serif','font-weight':700},g);reading.textContent='0 mV';
+  return {heat,ring,core,reading};
+});
+$('sensorList').innerHTML=SENSORS.map((s,i)=>`<div class="sensorrow"><div class="sensorname">${s.id} · ${s.name}<small>${({heel:'Rearfoot',mid:'Midfoot',fore:'Forefoot'})[s.region]} · ${s.pin}</small></div><div class="sensorbar"><div class="sensorfill" id="sf${i}"></div></div><div class="sensorreading" id="sv${i}">0 mV<small id="st${i}">-- ms last step</small></div></div>`).join('');
+// ============================ PROCESSING & SESSION STATE ============================
+let load=Array(N).fill(0),smooth=Array(N).fill(0),peak=Array(N).fill(750);
+let on=Array(N).fill(false), onset=Array(N).fill(null),stepSensorMs=Array(N).fill(0),lastRise=Array(N).fill(null);
+let stepOn=false,stepStart=0,firstSensor=-1, fallbackOn=false;
+let steps=[],trace=[],history=[],recentTimes=[];let lastT=null, lastReceiveAt=0, samples=0;
+let port=null,reader=null,readTask=null,connecting=false,disconnecting=false,demoTimer=null,demoT=0,connectedAt=0;
+let bleDevice=null,bleCharacteristic=null,bleConnecting=false,bleLastSeq=null,bleDropped=0,bleReceived=0,bleTimestampBase=null,bleLastRawT=null;
+const maxHistory=30000;
+function setStatus(mode,label){$('statusBox').className='status '+(mode||'');$('statusText').textContent=label;}
+function notify(msg){$('message').textContent=msg||'';}
+function resetAll(){
+  load.fill(0);smooth.fill(0);peak.fill(750);on.fill(false);onset.fill(null);stepSensorMs.fill(0);lastRise.fill(null);
+  stepOn=false;stepStart=0;firstSensor=-1;fallbackOn=false;
+  steps=[];trace=[];history=[];recentTimes=[];lastT=null;lastReceiveAt=0;samples=0;
+  $('gct').textContent='--';$('avg').textContent='--';$('cad').textContent='--';$('steps').textContent='0';
+  $('phase').textContent='Waiting for data';$('strikeNow').textContent='--';$('sampleRate').textContent='-- Hz';
+  $('trendLabel').textContent='Last 10 steps';$('btnExport').disabled=true;
+  ['sbHeel','sbMid','sbFore'].forEach(id=>$(id).style.flex='1');
+  SENSORS.forEach((_,i)=>{$('st'+i).textContent='-- ms last step';});drawSpark();
+}
+function completeStep(t){
+  const d=t-stepStart;
+  for(let i=0;i<N;i++){
+    if(onset[i]!==null){stepSensorMs[i]+=Math.max(0,t-onset[i]);onset[i]=null;}
+  }
+  if(d>=MIN_STEP_MS && d<2500){
+    steps.push({gct:d,start:stepStart,first:firstSensor,durations:stepSensorMs.slice()});
+    if(steps.length>200)steps.shift();updateStats();
+  }
+  stepOn=false;firstSensor=-1;stepSensorMs.fill(0);
+  on.fill(false);onset.fill(null);lastRise.fill(null);
+}
+// Determine initial contact region using the earliest observed threshold crossing.
+// When different regions activate in the same 10 ms sample, do not invent a sequence.
+function identifyFirstSensor(t){
+  const candidates=SENSORS.map((_,i)=>i).filter(i=>on[i]&&lastRise[i]!==null&&t-lastRise[i]>=0&&t-lastRise[i]<=120);
+  if(!candidates.length)return -1;
+  const firstTime=Math.min(...candidates.map(i=>lastRise[i]));
+  const earliest=candidates.filter(i=>lastRise[i]===firstTime);
+  if(new Set(earliest.map(i=>SENSORS[i].region)).size>1)return -1;
+  return earliest.sort((a,b)=>load[b]-load[a])[0];
+}
+function processSample(t,vals,contactFlag){
+  if(!Number.isFinite(t)||!vals||vals.length!==N||vals.some(x=>!Number.isFinite(x)))return;
+  // Gaps and clock resets invalidate in-progress contact; do not generate a false step.
+  if(lastT!==null&&(t<lastT||t-lastT>800)){
+    stepOn=false;firstSensor=-1;fallbackOn=false;on.fill(false);onset.fill(null);stepSensorMs.fill(0);lastRise.fill(null);recentTimes=[];
+  }
+  lastT=t;lastReceiveAt=performance.now();samples++;
+  for(let i=0;i<N;i++){load[i]=Math.max(0,vals[i]);peak[i]=Math.max(750,peak[i]*.9997,load[i]);}
+  const total=load.reduce((a,b)=>a+b,0);
+  // Boolean flag from firmware has precedence; fallback matches firmware aggregate thresholds.
+  if(contactFlag===0||contactFlag===1)fallbackOn=contactFlag===1;
+  else if(!fallbackOn&&total>TOTAL_ON)fallbackOn=true;
+  else if(fallbackOn&&total<TOTAL_OFF)fallbackOn=false;
+  const contact=fallbackOn;
+  // Track threshold crossings before the aggregate contact flag transitions high.
+  // Otherwise multiple active channels could be misclassified by array order.
+  for(let i=0;i<N;i++){
+    const was=on[i];
+    if(!was&&load[i]>SENSOR_ON){on[i]=true;lastRise[i]=t;}
+    else if(was&&load[i]<SENSOR_OFF)on[i]=false;
+  }
+  if(!stepOn&&contact){
+    stepOn=true;stepStart=t;stepSensorMs.fill(0);onset.fill(null);
+    firstSensor=identifyFirstSensor(t);
+  }
+  for(let i=0;i<N;i++){
+    if(!stepOn)continue;
+    if(on[i]&&onset[i]===null){onset[i]=t;}
+    else if(!on[i]&&onset[i]!==null){stepSensorMs[i]+=Math.max(0,t-onset[i]);onset[i]=null;}
+  }
+  // If no sensor individually exceeded its threshold at contact onset,
+  // allow a newly activated sensor to classify within the next 60 ms.
+  if(stepOn&&firstSensor<0&&t-stepStart<=60)firstSensor=identifyFirstSensor(t);
+  if(stepOn&&!contact)completeStep(t);
+  $('phase').textContent=contact?'Foot in contact':'Swing / unloaded';
+  trace.push({t,v:total,c:contact});if(trace.length>500)trace.shift();
+  // Raw firmware data retained in device-time milliseconds for export.
+  history.push([Math.round(t),...load.map(Math.round),contact?1:0]);
+  if(history.length>maxHistory)history.splice(0,5000);
+  $('btnExport').disabled=history.length===0;
+  recentTimes.push(t);if(recentTimes.length>101)recentTimes.shift();
+  if(samples%20===0&&recentTimes.length>1){const dt=recentTimes.at(-1)-recentTimes[0];$('sampleRate').textContent=dt>0?`${(1000*(recentTimes.length-1)/dt).toFixed(0)} Hz`:'-- Hz';}
+}
+// ============================ DATA VISUALIZATION ============================
+function drawSpark(){
+  const e=$('gctSpark');e.replaceChildren();
+  svg('line',{x1:0,y1:65,x2:260,y2:65,stroke:'#2b4851','stroke-width':1},e);
+  const data=steps.slice(-10).map(s=>s.gct);
+  if(!data.length){const txt=svg('text',{x:130,y:37,'text-anchor':'middle',fill:'#799aa1','font-size':11},e);txt.textContent='Waiting for steps';return;}
+  const lo=Math.min(...data)-20,hi=Math.max(...data)+20, span=Math.max(1,hi-lo);
+  const coords=data.map((n,i)=>[15+(i/(Math.max(1,data.length-1)))*230,61-(n-lo)/span*52]);
+  if(data.length>1)svg('polyline',{points:coords.map(a=>a.join(',')).join(' '),fill:'none',stroke:'#bdef67','stroke-width':2.4,'stroke-linecap':'round','stroke-linejoin':'round'},e);
+  coords.forEach(([x,y],i)=>svg('circle',{cx:x,cy:y,r:i===coords.length-1?4.6:3,fill:i===coords.length-1?'#bdef67':'#54d9d0'},e));
+  $('trendLabel').textContent=data.length+' step'+(data.length!==1?'s':'');
+}
+function updateStats(){
+  if(!steps.length)return;
+  const last=steps.at(-1),recent=steps.slice(-10);
+  $('gct').textContent=Math.round(last.gct);
+  $('avg').textContent=Math.round(recent.reduce((a,s)=>a+s.gct,0)/recent.length);
+  $('steps').textContent=steps.length;
+  if(steps.length>=3){
+    const latest=steps.slice(-7),d=[];
+    for(let i=1;i<latest.length;i++)if(latest[i].start-latest[i-1].start>250)d.push(latest[i].start-latest[i-1].start);
+    $('cad').textContent=d.length?Math.round(120000/(d.reduce((a,b)=>a+b,0)/d.length)):'--';
+  }
+  const category=i=>i<0?'unknown':SENSORS[i].region;
+  const c=category(last.first);
+  $('strikeNow').textContent=({heel:'Heel strike',mid:'Midfoot strike',fore:'Forefoot strike',unknown:'Unclassified'})[c];
+  const tally={heel:0,mid:0,fore:0};
+  steps.slice(-20).forEach(s=>{const r=category(s.first);if(r in tally)tally[r]++;});
+  $('sbHeel').style.flex=String(tally.heel||.0001);$('sbMid').style.flex=String(tally.mid||.0001);$('sbFore').style.flex=String(tally.fore||.0001);
+  for(let i=0;i<N;i++)$('st'+i).textContent=last.durations[i]>0?`${Math.round(last.durations[i])} ms last step`:'-- ms last step';
+  drawSpark();
+}
+function heatColor(level){return `hsl(${181-164*level},${66+23*level}%,${52+5*level}%)`;}
+const cv=$('trace'),ctx=cv.getContext('2d');
+function drawTrace(){
+  const dpr=window.devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;
+  if(!w||!h)return;
+  if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr);}
+  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
+  for(let i=1;i<4;i++){ctx.strokeStyle='#27424b';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(0,h*i/4);ctx.lineTo(w,h*i/4);ctx.stroke();}
+  if(trace.length<2)return;
+  const max=Math.max(1000,...trace.map(p=>p.v)),step=w/499,offset=(500-trace.length)*step;
+  trace.forEach((p,i)=>{if(p.c){ctx.fillStyle='rgba(189,239,103,.065)';ctx.fillRect(offset+i*step,0,step+1,h);}});
+  ctx.beginPath();trace.forEach((p,i)=>{const x=offset+i*step,y=h-8-(p.v/max)*(h-18);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+  ctx.strokeStyle='#bdef67';ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();
+}
+function render(){
+  for(let i=0;i<N;i++){
+    smooth[i]+=(load[i]-smooth[i])*.28;
+    // Ignore low-level positive readings in the heat map without altering raw values or CSV.
+    const filtered=Math.max(0,smooth[i]-NOISE_FLOOR_MV);
+    const level=Math.min(1,filtered/Math.max(1,peak[i]-NOISE_FLOOR_MV));
+    const node=nodes[i],color=heatColor(level);
+    node.heat.setAttribute('r',String(28+52*level));node.heat.setAttribute('fill',color);
+    node.heat.setAttribute('opacity',level>.02?(0.18+0.82*level).toFixed(3):'0');
+    node.core.setAttribute('fill',level>.03?color:'#49616a');
+    node.ring.setAttribute('stroke',on[i]?color:'#64838a');
+    node.reading.textContent=Math.round(Math.max(0,load[i]-NOISE_FLOOR_MV))+' mV';node.reading.setAttribute('fill',on[i]?'#bdef67':'#86a6ac');
+    $('sf'+i).style.width=(level*100).toFixed(1)+'%';
+    $('sv'+i).firstChild.textContent=Math.round(load[i])+' mV';
+  }
+  if(bleCharacteristic){
+    const age=lastReceiveAt?performance.now()-lastReceiveAt:performance.now()-connectedAt;
+    const stale=age>2500;
+    const statusLabel=stale?'BLE stream stalled':`BLE streaming · ${bleDropped} missing packets`;
+    if($('statusText').textContent!==statusLabel)setStatus(stale?'error':'live',statusLabel);
+  }
+  if(port&&!disconnecting){
+    const age=lastReceiveAt?performance.now()-lastReceiveAt:performance.now()-connectedAt;
+    const stale=(lastReceiveAt&&age>1800)||(!lastReceiveAt&&age>5500);
+    const statusLabel=stale?'No serial data':(lastReceiveAt?'XIAO streaming':'XIAO connected · checking stream');
+    if($('statusText').textContent!==statusLabel)setStatus(stale?'error':'live',statusLabel);
+  }
+  drawTrace();requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+// ============================ BLUETOOTH LE STREAM ============================
+// One notification = one 16-byte sample, not a text/CSV notification.
+const BLE_SERVICE='713d0001-5b8c-4e35-ae3f-5296c7420010';
+const BLE_DATA='713d0002-5b8c-4e35-ae3f-5296c7420010';
+function onBLEData(event){
+  const v=event.target.value;
+  if(!v||v.byteLength!==16)return;
+  const rawT=v.getUint32(0,true),vals=[];
+  for(let i=0;i<5;i++)vals.push(v.getUint16(4+2*i,true));
+  const contact=v.getUint8(14),seq=v.getUint8(15);
+  if(bleLastSeq!==null)bleDropped+=(seq-bleLastSeq-1+256)%256;
+  bleLastSeq=seq;bleReceived++;
+  // Handle 32-bit millis wrap without losing contact timing continuity.
+  if(bleLastRawT!==null&&rawT<bleLastRawT&&bleLastRawT-rawT>0x80000000)bleTimestampBase+=4294967296;
+  bleLastRawT=rawT;
+  processSample(bleTimestampBase+rawT,vals,contact);
+}
+function onBLEDisconnected(){
+  if(bleCharacteristic)bleCharacteristic.removeEventListener('characteristicvaluechanged',onBLEData);
+  bleCharacteristic=null;bleDevice=null;
+  $('btnBLE').textContent='Connect Bluetooth';
+  setStatus('','Bluetooth disconnected');
+  notify('Bluetooth disconnected. Reconnect to start a new session.');
+}
+async function disconnectBLE(){
+  if(bleDevice?.gatt?.connected)bleDevice.gatt.disconnect();
+  else onBLEDisconnected();
+}
+async function connectBLE(){
+  if(bleConnecting)return;
+  if(bleDevice){await disconnectBLE();return;}
+  if(!navigator.bluetooth){notify('Web Bluetooth is unavailable. Use Chrome or Edge on a supported computer, preferably from http://localhost.');return;}
+  bleConnecting=true;$('btnBLE').disabled=true;notify('');
+  try{
+    stopDemo();
+    if(port)await disconnect();
+    const dev=await navigator.bluetooth.requestDevice({filters:[{services:[BLE_SERVICE]}]});
+    const server=await dev.gatt.connect();
+    const service=await server.getPrimaryService(BLE_SERVICE);
+    const characteristic=await service.getCharacteristic(BLE_DATA);
+    await characteristic.startNotifications();
+    // Reset processing state only after the BLE service is connected successfully.
+    resetAll();bleTimestampBase=0;bleLastRawT=null;bleLastSeq=null;bleDropped=0;bleReceived=0;
+    bleDevice=dev;bleCharacteristic=characteristic;
+    dev.addEventListener('gattserverdisconnected',onBLEDisconnected,{once:true});
+    characteristic.addEventListener('characteristicvaluechanged',onBLEData);
+    connectedAt=performance.now();$('btnBLE').textContent='Disconnect BLE';
+    $('hint').textContent='Receiving 16-byte binary BLE packets. The firmware targets 100 Hz sampling, but browser notification throughput may be lower; watch the measured stream rate and missing packet count.';
+    setStatus('live','BLE connected · waiting for data');
+  }catch(e){if(e.name!=='NotFoundError')notify('Bluetooth connection failed: '+e.message);}
+  finally{bleConnecting=false;$('btnBLE').disabled=false;}
+}
+// ============================ USB SERIAL STREAM ============================
+function parseLine(line){
+  if(!line)return;
+  let t=performance.now(),vals=null,contact=null;
+  if(line.includes('S1:')){
+    vals=[];for(let i=1;i<=N;i++){const m=line.match(new RegExp('S'+i+':(-?\\d+)'));if(!m)return;vals.push(Number(m[1]));}
+    const m=line.match(/Contact:(-?\d+)/);if(m)contact=Number(m[1])>0?1:0;
+  }else{
+    const p=line.split(',').map(s=>s.trim());
+    if(p.length>=N+2&&p.slice(0,N+2).every(s=>s!==''&&Number.isFinite(Number(s)))){
+      t=Number(p[0]);vals=p.slice(1,N+1).map(Number);contact=Number(p[N+1])>0?1:0;
+    }
+  }
+  if(vals)processSample(t,vals,contact);
+}
+async function readSerial(activePort){
+  const dec=new TextDecoder();let buf='';
+  try{
+    reader=activePort.readable.getReader();
+    while(true){
+      const {value,done}=await reader.read();if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      let ix;while((ix=buf.indexOf('\n'))>=0){parseLine(buf.slice(0,ix).trim());buf=buf.slice(ix+1);}
+      if(buf.length>4096)buf='';
+    }
+  }catch(e){if(!disconnecting)notify('Serial connection interrupted: '+e.message);}
+  finally{
+    if(reader){try{reader.releaseLock();}catch{}reader=null;}
+    try{await activePort.close();}catch{}
+    if(port===activePort){port=null;setStatus('','Disconnected');$('btnConnect').textContent='Connect USB';}
+    readTask=null;disconnecting=false;
+  }
+}
+async function disconnect(){
+  if(!port)return;
+  disconnecting=true;
+  $('btnConnect').disabled=true;
+  try{if(reader)await reader.cancel();if(readTask)await readTask;}
+  catch(e){notify('Disconnect issue: '+e.message);}
+  finally{$('btnConnect').disabled=false;}
+}
+async function connect(){
+  if(connecting)return;
+  if(bleDevice)await disconnectBLE();
+  if(port){await disconnect();return;}
+  if(!('serial' in navigator)){notify('Web Serial requires Chrome or Edge on a supported computer, with a secure origin or local file.');return;}
+  connecting=true;$('btnConnect').disabled=true;notify('');
+  try{
+    // Stop demo before opening hardware. Request port only once per click.
+    stopDemo();
+    const chosen=await navigator.serial.requestPort();
+    await chosen.open({baudRate:115200});
+    port=chosen;resetAll();connectedAt=performance.now();setStatus('live','XIAO connected · checking stream');
+    $('btnConnect').textContent='Disconnect USB';
+    $('hint').textContent='Reset the XIAO with the insole unloaded for 2 seconds to calibrate. These are approximate baseline-adjusted mV-equivalent signals.';
+    readTask=readSerial(chosen);
+  }catch(e){
+    if(e.name!=='NotFoundError')notify('Could not connect: '+e.message+' Close Arduino Serial Monitor/Plotter, then retry.');
+    if(!port){setStatus('','Not connected');$('btnConnect').textContent='Connect USB';}
+  }finally{connecting=false;$('btnConnect').disabled=false;}
+}
+// ============================ DEMO, EXPORT & EVENTS ============================
+// Simulated activation timings in physical order S1 toe, S2 lateral midfoot, S3 fifth met, S4 first met, S5 heel.
+const DEMO_WIN=[
+  [[.55,1],[.15,.7],[.3,.92],[.35,.95],[0,.45]],     // heel strike
+  [[.5,1],[0,.65],[.12,.92],[.18,.95],[.2,.5]],      // midfoot strike
+  [[.45,1],[.3,.6],[0,.9],[.05,.94],[.4,.55]]        // forefoot strike
+];
+const DEMO_AMP=[900,600,1100,1500,1400];
+const shape=(phase,a,b)=>phase<a||phase>b?0:Math.pow(Math.sin(Math.PI*(phase-a)/(b-a)),1.4);
+let demoStepT=0,demoStride=714,demoGct=250,demoStrike=0;
+async function toggleDemo(){
+  if(demoTimer){stopDemo();setStatus('','Not connected');return;}
+  if(port)await disconnect();
+  if(bleDevice)await disconnectBLE();
+  resetAll();notify('');demoT=0;demoStepT=0;demoGct=250;demoStride=714;demoStrike=0;
+  $('btnDemo').textContent='Stop demo';$('hint').textContent='Simulated demonstration data. No physical sensor is connected.';
+  setStatus('demo','Simulated demo');
+  demoTimer=setInterval(()=>{
+    for(let k=0;k<2;k++){
+      demoT+=10;
+      if(demoT-demoStepT>=demoStride){demoStepT=demoT;demoGct=225+Math.random()*50;demoStride=690+Math.random()*50;demoStrike=Math.floor(Math.random()*3);}
+      const ph=(demoT-demoStepT)/demoGct;
+      const vals=DEMO_AMP.map((A,i)=>{const [a,b]=DEMO_WIN[demoStrike][i];return Math.round(A*shape(ph,a,b)*(.9+Math.random()*.2));});
+      processSample(demoT,vals,null);
+    }
+  },20);
+}
+function stopDemo(){if(demoTimer)clearInterval(demoTimer);demoTimer=null;$('btnDemo').textContent='Demo mode';}
+function exportCSV(){
+  if(!history.length)return;
+  const csv='t_ms,S1,S2,S3,S4,S5,contact\n'+history.map(r=>r.join(',')).join('\n')+'\n';
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=url;a.download='kynetix_'+(demoTimer?'demo':'live')+'_insole_'+new Date().toISOString().replace(/[:.]/g,'-')+'.csv';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);
+}
+$('btnConnect').addEventListener('click',connect);
+$('btnBLE').addEventListener('click',connectBLE);
+$('btnDemo').addEventListener('click',toggleDemo);
+$('btnReset').addEventListener('click',()=>{resetAll();notify('');});
+$('btnExport').addEventListener('click',exportCSV);
+</script>
+</body>
+</html>
