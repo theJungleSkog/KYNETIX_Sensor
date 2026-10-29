@@ -1,0 +1,287 @@
+// KYNETIX Capacitive Sensor Logger - Logger_v1 (single sensor)
+// Hardware: XIAO nRF52840 + ProtoCentral FDC1004 + ONE capacitive sensor.
+// WIRING:
+//   XIAO 3V3 -> breakout 3.3V (leave breakout VCC disconnected)
+//   XIAO GND -> breakout GND
+//   XIAO D4 (SDA) -> SDA; XIAO D5 (SCL) -> SCL
+//   CIN1 -> sensor upper copper plate; lower copper plate -> GND.
+//
+// COMMANDS (USB serial, use kynetix_logger.py on the computer):
+//   b = zero the sensor at its current resting state, then START logging.
+//   e (or n) = END logging.
+//   (m = save file is handled by the computer script.)
+//
+// OUTPUT: lines starting with '#' are messages. Every other line is CSV data:
+//   sample,micros,cap_pF,delta_pF
+//   cap = absolute capacitance, delta = change from the zero taken at 'b'.
+//   Every sample is logged raw (no filtering), ~400 samples/s.
+//   micros is time since the board booted. The sample counter lets you detect
+//   any missed samples.
+//
+// Works on the Seeed mbed core (Seeed nRF52 mbed-enabled Boards) with no extra
+// libraries. USB serial is built in.
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <math.h>
+#include <stdio.h>
+
+// =========================== SETTINGS ===========================
+const char *FW_VERSION = "Logger_v1_single";
+const uint8_t FDC_ADDR = 0x50;
+
+// FDC1004 sample rate code: 1 = 100 S/s, 2 = 200 S/s, 3 = 400 S/s.
+const uint8_t RATE_CODE = 3;
+const int BASELINE_SAMPLES = 100;
+const uint32_t TIMEOUT_MS = 50;
+const float COUNTS_PER_PF = 524288.0f;
+const float CAPDAC_STEP_PF = 3.125f;
+const float VALID_RESIDUAL_LIMIT_PF = 14.9f;
+
+const uint8_t REG_FDC_CONFIG = 0x0C;
+const uint16_t DONE_1_MASK = 0x0008;
+// Repeat bit (8) + measure channel 1 (bit 7).
+const uint16_t REPEAT_CH1_CONFIG = ((uint16_t)RATE_CODE << 10) | (1U << 8) | (1U << 7);
+
+// ============================ STATE =============================
+uint8_t capdac = 0;
+float baselinePF = 0.0f;
+const char *fdcError = "";
+char fdcErrorBuf[96];
+bool logging = false;
+uint32_t sampleCount = 0;
+uint32_t skippedReads = 0;  // Reads that were out of range.
+
+// ======================= LOW-LEVEL I2C ==========================
+bool writeReg(uint8_t reg, uint16_t value) {
+  Wire.beginTransmission(FDC_ADDR);
+  Wire.write(reg);
+  Wire.write((uint8_t)(value >> 8));
+  Wire.write((uint8_t)value);
+  return Wire.endTransmission() == 0;
+}
+
+bool readReg(uint8_t reg, uint16_t &value) {
+  Wire.beginTransmission(FDC_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(true) != 0) return false;  // full STOP (mbed core mishandles repeated start)
+  if (Wire.requestFrom(FDC_ADDR, (uint8_t)2) != 2) return false;
+  uint16_t hi = (uint8_t)Wire.read();
+  uint16_t lo = (uint8_t)Wire.read();
+  value = (hi << 8) | lo;
+  return true;
+}
+
+int32_t decodeResult(uint16_t msb, uint16_t lsb) {
+  uint32_t bits = ((uint32_t)msb << 8) | (lsb >> 8);
+  return (bits & 0x800000U) ? (int32_t)bits - 16777216L : (int32_t)bits;
+}
+
+// MEAS1: CHA = CIN1 (0), CHB = 4 (CAPDAC reference, single-ended).
+bool configureSensor() {
+  uint16_t conf = (0U << 13) | (4U << 10) | ((uint16_t)capdac << 5);
+  return writeReg(0x08, conf);
+}
+
+// Single triggered measurement, used only while zeroing.
+bool readOne(float &residualPF) {
+  uint16_t trigger = ((uint16_t)RATE_CODE << 10) | 0x0080U;
+  if (!writeReg(REG_FDC_CONFIG, trigger)) return false;
+
+  uint32_t startMS = millis();
+  while (true) {
+    uint16_t status;
+    if (!readReg(REG_FDC_CONFIG, status)) return false;
+    if (status & DONE_1_MASK) break;
+    if ((uint32_t)(millis() - startMS) >= TIMEOUT_MS) return false;
+    delay(1);
+  }
+
+  uint16_t msb, lsb;
+  if (!readReg(0x00, msb) || !readReg(0x01, lsb)) return false;
+  residualPF = decodeResult(msb, lsb) / COUNTS_PER_PF;
+  return isfinite(residualPF);
+}
+
+// Adjust the CAPDAC offset so the resting capacitance sits near the middle of range.
+bool tuneOffset() {
+  capdac = 0;
+  for (int tries = 0; tries < 64; tries++) {
+    if (!configureSensor()) return false;
+    float residual;
+    if (!readOne(residual)) return false;
+    if (residual > 4.0f && capdac < 31) { capdac++; continue; }
+    if (residual < -4.0f && capdac > 0) { capdac--; continue; }
+    return fabsf(residual) < VALID_RESIDUAL_LIMIT_PF;
+  }
+  return false;
+}
+
+bool initializeFDC() {
+  uint16_t manufacturer, device;
+  if (!readReg(0xFE, manufacturer) || !readReg(0xFF, device)) {
+    fdcError = "no I2C response at 0x50 (check SDA=D4, SCL=D5, 3V3, GND)";
+    return false;
+  }
+  if (manufacturer != 0x5449 || device != 0x1004) {
+    snprintf(fdcErrorBuf, sizeof(fdcErrorBuf),
+             "unexpected ID: manufacturer 0x%04X, device 0x%04X",
+             manufacturer, device);
+    fdcError = fdcErrorBuf;
+    return false;
+  }
+  if (!writeReg(REG_FDC_CONFIG, 0x8000)) {  // Software reset.
+    fdcError = "reset write failed";
+    return false;
+  }
+  delay(10);
+  uint16_t status;
+  if (!readReg(REG_FDC_CONFIG, status) || (status & 0x8000)) {
+    fdcError = "reset did not complete";
+    return false;
+  }
+  capdac = 0;
+  if (!configureSensor()) {
+    fdcError = "channel config write failed";
+    return false;
+  }
+  return true;
+}
+
+bool takeBaseline() {
+  if (!writeReg(REG_FDC_CONFIG, 0x0000)) return false;
+  if (!tuneOffset()) return false;
+  double sum = 0.0;
+  int good = 0;
+  for (int i = 0; i < BASELINE_SAMPLES; i++) {
+    float residual;
+    if (!readOne(residual) || fabsf(residual) >= VALID_RESIDUAL_LIMIT_PF) continue;
+    sum += residual + capdac * CAPDAC_STEP_PF;
+    good++;
+  }
+  if (good < (BASELINE_SAMPLES * 8 / 10)) return false;
+  baselinePF = (float)(sum / good);
+  return true;
+}
+
+bool startContinuousMeasurements() {
+  return writeReg(REG_FDC_CONFIG, REPEAT_CH1_CONFIG);
+}
+
+void stopMeasurements() {
+  writeReg(REG_FDC_CONFIG, 0x0000);
+}
+
+// Returns true only if there is a NEW, in-range conversion.
+bool readNewSample(float &absPF, uint32_t &sampleTimeUS) {
+  uint16_t status;
+  if (!readReg(REG_FDC_CONFIG, status)) return false;
+  if (!(status & DONE_1_MASK)) return false;
+
+  sampleTimeUS = micros();
+
+  uint16_t msb, lsb;
+  if (!readReg(0x00, msb) || !readReg(0x01, lsb)) return false;
+
+  float residual = decodeResult(msb, lsb) / COUNTS_PER_PF;
+  if (!isfinite(residual) || fabsf(residual) >= VALID_RESIDUAL_LIMIT_PF) {
+    skippedReads++;
+    return false;
+  }
+  absPF = residual + capdac * CAPDAC_STEP_PF;
+  return true;
+}
+
+// ======================= OUTPUT HELPERS =========================
+// Float-free formatting (the core's snprintf may not support %f).
+// Writes pf with 4 decimals into buf at position n.
+void appendPF(char *buf, size_t cap, size_t &n, float pf) {
+  long v = lroundf(pf * 10000.0f);
+  const char *sign = "";
+  if (v < 0) { sign = "-"; v = -v; }
+  int w = snprintf(buf + n, cap - n, "%s%ld.%04ld", sign, v / 10000, v % 10000);
+  if (w > 0) n += (size_t)w;
+}
+
+void printSample(uint32_t idx, uint32_t t, float a) {
+  char line[96];
+  int w = snprintf(line, sizeof(line), "%lu,%lu,", (unsigned long)idx, (unsigned long)t);
+  size_t n = (size_t)w;
+  appendPF(line, sizeof(line), n, a);  line[n++] = ',';
+  appendPF(line, sizeof(line), n, a - baselinePF);  line[n++] = '\n';
+  Serial.write((const uint8_t *)line, n);
+}
+
+// ====================== START / STOP LOGGING ====================
+void startLogging() {
+  logging = false;
+  Serial.println("# Starting: initializing FDC1004 and zeroing. Keep sensor at rest...");
+  if (!initializeFDC()) {
+    Serial.print("# ERROR: FDC1004 init failed: ");
+    Serial.println(fdcError);
+    return;
+  }
+  if (!takeBaseline()) {
+    Serial.println("# ERROR: zeroing failed (sensor out of range or unstable). Not logging.");
+    return;
+  }
+  if (!startContinuousMeasurements()) {
+    Serial.println("# ERROR: could not start continuous measurement. Not logging.");
+    return;
+  }
+  sampleCount = 0;
+  skippedReads = 0;
+  Serial.println("# ZERO DONE");
+  Serial.println("sample,micros,cap_pF,delta_pF");
+  logging = true;
+  digitalWrite(LED_BUILTIN, LOW);  // LED on (active low) while logging.
+  Serial.println("# >>> LOGGING STARTED <<<");
+}
+
+void stopLogging() {
+  if (!logging) {
+    Serial.println("# Not currently logging.");
+    return;
+  }
+  logging = false;
+  stopMeasurements();
+  digitalWrite(LED_BUILTIN, HIGH);
+  Serial.print("# >>> LOGGING STOPPED <<< samples: ");
+  Serial.print(sampleCount);
+  Serial.print(", out-of-range reads skipped: ");
+  Serial.println(skippedReads);
+}
+
+// ========================== MAIN ================================
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+  Serial.begin(115200);  // USB CDC; baud is ignored.
+  while (!Serial && millis() < 5000) delay(10);
+
+  Wire.begin();           // XIAO default I2C: D4 = SDA, D5 = SCL.
+  Wire.setClock(400000);
+
+  Serial.print("# KYNETIX ");
+  Serial.print(FW_VERSION);
+  Serial.println(" ready. b = zero + start logging, e = end logging.");
+}
+
+void loop() {
+  // Check for commands every pass, even while logging.
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == 'b' || c == 'B') startLogging();
+    else if (c == 'e' || c == 'E' || c == 'n' || c == 'N') stopLogging();
+  }
+
+  if (!logging) return;
+
+  float a;
+  uint32_t t;
+  if (!readNewSample(a, t)) {
+    delayMicroseconds(100);
+    return;
+  }
+  printSample(sampleCount++, t, a);
+}
