@@ -1,0 +1,225 @@
+// KYNETIX live capacitance viewer (single sensor on CIN1)  -- v2
+// XIAO nRF52840 + FDC1004. Wiring: 3V3->3.3V, GND->GND, D4->SDA, D5->SCL,
+// CIN1 -> the sensor plate AWAY from your hand/foot, the plate you press on -> GND.
+// (If the CIN1 plate faces your finger, your body's capacitance swamps the reading.)
+//
+// Open Tools > Serial Plotter (graph) or Serial Monitor (numbers), 115200 baud.
+// Prints ~50 lines/s:  Cap_pF:<absolute>,Delta_pF:<change from zero>
+// Send 'z' (type z + Enter in the Serial Monitor) to re-zero the delta.
+// Zero is also taken automatically at power-up, so start with the sensor at rest.
+//
+// What changed from v1 (why it "worked, then stopped after a few seconds"):
+//  1. v1 silently threw away any reading outside the chip's +/-15 pF window and kept
+//     printing the LAST good value, so the graph froze. v2 automatically moves the
+//     chip's offset (CAPDAC) to follow the signal, so large changes stay in range.
+//  2. v1 never noticed if the I2C link or the chip stopped answering; it froze the
+//     same way. v2 notices within 0.25 s, prints WHY in the Serial Monitor
+//     (lines starting with #), and restarts the chip by itself.
+//  3. I2C slowed to 100 kHz: more tolerant of long or loose jumper wires.
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <math.h>
+
+const uint8_t  FDC_ADDR = 0x50;
+const uint8_t  RATE_CODE = 3;                  // 400 S/s
+const uint8_t  REG_CONF_MEAS1 = 0x08;
+const uint8_t  REG_FDC_CONFIG = 0x0C;
+const uint16_t DONE_1_MASK = 0x0008;
+const uint16_t REPEAT_BIT = 0x0100;
+const uint16_t REPEAT_CH1_CONFIG = ((uint16_t)RATE_CODE << 10) | REPEAT_BIT | 0x0080;
+const float    COUNTS_PER_PF = 524288.0f;      // 2^19 counts per pF
+const float    CAPDAC_STEP_PF = 3.125f;        // CAPDAC adds 3.125 pF per step (0..31)
+const float    VALID_RESIDUAL_LIMIT_PF = 14.9f;// chip window is +/-15 pF around the CAPDAC
+const float    RERANGE_PF = 10.0f;             // re-centre the window when |residual| > 10 pF
+const uint32_t PRINT_INTERVAL_MS = 20;         // 50 Hz display
+const uint32_t STALE_MS = 250;                 // no good sample this long -> diagnose + restart
+const uint32_t I2C_HZ = 100000;
+
+uint8_t  capdac = 0;
+float    baselinePF = 0.0f;
+float    latestPF = 0.0f;
+bool     haveSample = false;
+bool     sensorOK = false;
+uint32_t lastPrintMS = 0;
+uint32_t lastGoodMS = 0;
+uint32_t i2cFails = 0;      // I2C transactions that failed since the last good sample
+uint32_t outOfRange = 0;    // saturated readings since the last good sample
+
+bool writeReg(uint8_t reg, uint16_t value) {
+  Wire.beginTransmission(FDC_ADDR);
+  Wire.write(reg);
+  Wire.write((uint8_t)(value >> 8));
+  Wire.write((uint8_t)value);
+  return Wire.endTransmission() == 0;
+}
+
+bool readReg(uint8_t reg, uint16_t &value) {
+  Wire.beginTransmission(FDC_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(true) != 0) return false;
+  if (Wire.requestFrom(FDC_ADDR, (uint8_t)2) != 2) return false;
+  uint16_t hi = (uint8_t)Wire.read();
+  uint16_t lo = (uint8_t)Wire.read();
+  value = (hi << 8) | lo;
+  return true;
+}
+
+int32_t decodeResult(uint16_t msb, uint16_t lsb) {
+  uint32_t bits = ((uint32_t)msb << 8) | (lsb >> 8);
+  return (bits & 0x800000U) ? (int32_t)bits - 16777216L : (int32_t)bits;
+}
+
+bool configureSensor() {   // CHA = CIN1, CHB = CAPDAC, CAPDAC value
+  return writeReg(REG_CONF_MEAS1, (4U << 10) | ((uint16_t)capdac << 5));
+}
+
+bool readOne(float &residualPF) {
+  if (!writeReg(REG_FDC_CONFIG, ((uint16_t)RATE_CODE << 10) | 0x0080U)) return false;
+  uint32_t startMS = millis();
+  while (true) {
+    uint16_t status;
+    if (!readReg(REG_FDC_CONFIG, status)) return false;
+    if (status & DONE_1_MASK) break;
+    if (millis() - startMS >= 50) return false;
+    delay(1);
+  }
+  uint16_t msb, lsb;
+  if (!readReg(0x00, msb) || !readReg(0x01, lsb)) return false;
+  residualPF = decodeResult(msb, lsb) / COUNTS_PER_PF;
+  return isfinite(residualPF);
+}
+
+bool tuneOffset() {
+  capdac = 0;
+  for (int i = 0; i < 64; i++) {
+    if (!configureSensor()) return false;
+    float r;
+    if (!readOne(r)) return false;
+    if (r > 4.0f && capdac < 31) { capdac++; continue; }
+    if (r < -4.0f && capdac > 0) { capdac--; continue; }
+    return fabsf(r) < VALID_RESIDUAL_LIMIT_PF;
+  }
+  return false;
+}
+
+// Move the CAPDAC so the +/-15 pF window is centred on the current signal again.
+void rerange(float residualPF) {
+  int steps = (int)lroundf(residualPF / CAPDAC_STEP_PF);
+  if (steps == 0) return;
+  int c = (int)capdac + steps;
+  if (c < 0) c = 0;
+  if (c > 31) c = 31;
+  if (c == capdac) return;   // already at the end of the CAPDAC range
+  capdac = (uint8_t)c;
+  configureSensor();         // takes effect from the next conversion
+}
+
+// Re-init the chip, tune offset, take the zero, start continuous measurement.
+bool setupSensor(bool takeZero) {
+  uint16_t man, dev;
+  if (!readReg(0xFE, man) || !readReg(0xFF, dev) || man != 0x5449 || dev != 0x1004) {
+    Serial.println("# FDC1004 not detected: check 3V3, GND, SDA=D4, SCL=D5");
+    return false;
+  }
+  writeReg(REG_FDC_CONFIG, 0x8000);  // reset
+  delay(10);
+  if (!tuneOffset()) {
+    Serial.println("# Offset tuning failed: sensor capacitance above ~110 pF, or a short on CIN1");
+    return false;
+  }
+  if (takeZero) {
+    double sum = 0;
+    int good = 0;
+    for (int i = 0; i < 100; i++) {
+      float r;
+      if (readOne(r) && fabsf(r) < VALID_RESIDUAL_LIMIT_PF) {
+        sum += r + capdac * CAPDAC_STEP_PF;
+        good++;
+      }
+    }
+    if (good < 80) {
+      Serial.println("# Zeroing failed: readings unstable (loose CIN1 wire or touching the sensor?)");
+      return false;
+    }
+    baselinePF = (float)(sum / good);
+    Serial.print("# Running. Zero = "); Serial.print(baselinePF, 3);
+    Serial.print(" pF, CAPDAC = "); Serial.println(capdac);
+  } else {
+    Serial.println("# Restarted (zero kept).");
+  }
+  if (!writeReg(REG_FDC_CONFIG, REPEAT_CH1_CONFIG)) return false;
+  lastGoodMS = millis(); i2cFails = 0; outOfRange = 0;
+  return true;
+}
+
+void diagnoseAndRestart() {
+  if (i2cFails > 0) {
+    Serial.print("# Lost: I2C stopped answering ("); Serial.print(i2cFails);
+    Serial.println(" failed reads). Check SDA/SCL/3V3/GND wires and solder joints.");
+  } else if (outOfRange > 0) {
+    Serial.print("# Lost: reading outside the chip's range at CAPDAC = "); Serial.print(capdac);
+    Serial.println(". Is CIN1 touching GND, or is your hand on the CIN1 plate/wire?");
+  } else {
+    Serial.println("# Lost: chip stopped measuring (it may have reset from a power dip). Check 3V3/GND.");
+  }
+  bool hadZero = haveSample;
+  sensorOK = setupSensor(!hadZero);
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial && millis() < 5000) delay(10);
+  Wire.begin();
+  Wire.setClock(I2C_HZ);
+  sensorOK = setupSensor(true);
+}
+
+void loop() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == 'z' || c == 'Z') { haveSample = false; sensorOK = setupSensor(true); }
+  }
+
+  if (!sensorOK) {
+    delay(2000);
+    sensorOK = setupSensor(!haveSample);  // keep retrying
+    return;
+  }
+
+  uint16_t status;
+  if (!readReg(REG_FDC_CONFIG, status)) {
+    i2cFails++;
+  } else if (!(status & REPEAT_BIT)) {
+    // configuration lost: the chip reset itself (power dip)
+    Serial.println("# Chip lost its settings (reset). Restarting it.");
+    sensorOK = setupSensor(!haveSample);
+    return;
+  } else if (status & DONE_1_MASK) {
+    uint16_t msb, lsb;
+    if (readReg(0x00, msb) && readReg(0x01, lsb)) {
+      float r = decodeResult(msb, lsb) / COUNTS_PER_PF;
+      if (isfinite(r) && fabsf(r) < VALID_RESIDUAL_LIMIT_PF) {
+        latestPF = r + capdac * CAPDAC_STEP_PF;
+        haveSample = true;
+        lastGoodMS = millis(); i2cFails = 0; outOfRange = 0;
+        if (fabsf(r) > RERANGE_PF) rerange(r);           // follow big changes
+      } else if (isfinite(r)) {
+        outOfRange++;
+        rerange(r > 0 ? 4 * CAPDAC_STEP_PF : -4 * CAPDAC_STEP_PF);   // saturated: jump 12.5 pF
+      }
+    } else {
+      i2cFails++;
+    }
+  }
+
+  if (millis() - lastGoodMS > STALE_MS) { diagnoseAndRestart(); return; }
+
+  if (haveSample && millis() - lastPrintMS >= PRINT_INTERVAL_MS) {
+    lastPrintMS = millis();
+    Serial.print("Cap_pF:");
+    Serial.print(latestPF, 4);
+    Serial.print(",Delta_pF:");
+    Serial.println(latestPF - baselinePF, 4);
+  }
+}
