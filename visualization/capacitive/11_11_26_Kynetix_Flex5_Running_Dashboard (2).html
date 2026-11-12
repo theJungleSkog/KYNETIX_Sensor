@@ -1,0 +1,905 @@
+<!doctype html>
+<!--
+  KYNETIX RUNNING DASHBOARD (11/11/26) | V6 flex insole, 5 capacitive pads, XIAO nRF52840 + 2x FDC1004
+  Firmware: Kynetix_Flex5_XIAO_FDC1004_BLE_USB.ino (NUM_FDC = 2). Same BLE packet / USB CSV as before:
+    BLE: 16 bytes = u32 t_ms, 5 x u16 change in capacitance (fF), u8 contact, u8 seq
+    USB: t_ms,S1,S2,S3,S4,S5,contact @ 115200
+  Packet slots: 0 big toe (flex S5) | 1 lateral midfoot (flex S2) | 2 5th met (flex S3) | 3 1st met (flex S4) | 4 heel (flex S1)
+
+  What is new vs the 11/08 dashboard:
+    - Heat map is a real interpolated field drawn on one ABSOLUTE scale in pF (auto or fixed 1/2/5/10 pF),
+      with a color legend, so pads can be compared with each other. Live view or last-step peak view.
+    - Estimated centre-of-pressure (CoP) dot and the CoP path of the last step on the map.
+    - Running metrics: GCT (hero), live contact timer, cadence, stride time, estimated flight time,
+      duty factor, GCT variability (CV), run/walk detection, run clock.
+    - Per-step GCT bar chart (coloured by foot strike), roll-off timeline (when each pad loads/unloads
+      within the contact), per-pad pF traces, and a per-pad table.
+    - Two exports: raw samples CSV (as before) and a per-step CSV for analysis.
+  Contact detection, calibration, Zero and automatic re-zero are the same logic as the 11/08 (v6) dashboard.
+  Internally everything is still in fF (what the firmware sends); it is shown in pF (1 pF = 1000 fF).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#071219">
+<title>Kynetix | Run Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#071219;--surface:#0f1f26;--surface2:#142830;--line:#27414a;--line2:#34545d;
+  --text:#f0f8f6;--muted:#90abb3;--faint:#6f8c94;
+  --accent:#bdef67;--cyan:#54d9d0;--amber:#fac36b;--red:#ff805f;
+  --p0:#76a62a;--p1:#8a6be6;--p2:#c4841c;--p3:#00998f;--p4:#e35a35;
+}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0;color:var(--text);background:radial-gradient(ellipse 70% 45% at 88% 0%,#18343a 0%,transparent 70%),var(--bg);font-family:'DM Sans',Inter,system-ui,sans-serif;font-size:14px;min-height:100vh}
+button{font:inherit;cursor:pointer;transition:background .16s,border-color .16s}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+button:disabled{opacity:.5;cursor:not-allowed}
+.shell{max-width:1520px;margin:auto;padding:0 30px}
+/* header */
+.topbar{border-bottom:1px solid var(--line);background:#09171cdd;position:sticky;top:0;z-index:20;backdrop-filter:blur(6px)}
+.topbar .shell{min-height:80px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-top:12px;padding-bottom:12px}
+.brandgroup{display:flex;align-items:center;gap:15px}
+.brandicon{width:44px;height:44px;flex:none}
+.wordmark{font-family:'Barlow Condensed','Arial Narrow',sans-serif;font-size:30px;font-weight:800;line-height:.9;letter-spacing:.13em}
+.brandtag{font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.21em;text-transform:uppercase;margin-top:7px}
+.topcontrols{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+.status{border:1px solid var(--line);background:#0e2027;padding:9px 12px;border-radius:100px;display:flex;align-items:center;gap:8px;color:#afc5c9;font-size:12px;white-space:nowrap}
+.statusdot{width:8px;height:8px;border-radius:50%;background:#647780}
+.status.live .statusdot{background:var(--accent);box-shadow:0 0 0 4px #bdef6721,0 0 15px #bdef6777}
+.status.demo .statusdot{background:var(--cyan)}
+.status.error .statusdot{background:var(--red)}
+.btn{border:1px solid #31505a;color:var(--text);background:#152a32;border-radius:8px;padding:10px 13px;font-size:12px;font-weight:700;white-space:nowrap}
+.btn:hover:not(:disabled){border-color:#7cabb0;background:#1b3540}
+.btn.primary{background:var(--accent);color:#071219;border-color:var(--accent)}
+.btn.primary:hover:not(:disabled){background:#d1ff8a}
+.btn.cal{color:#071219;background:var(--cyan);border-color:var(--cyan)}
+.btn.cal:hover:not(:disabled){background:#7ae6df}
+.btn.export{color:var(--accent);border-color:#5c8061;background:#142a28}
+/* intro */
+.intro{padding:24px 0 18px;display:flex;justify-content:space-between;align-items:end;gap:20px;flex-wrap:wrap}
+.eyebrow{color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.23em;font-size:10px}
+.intro h1{font:700 clamp(36px,4.2vw,54px)/1.03 'Barlow Condensed','Arial Narrow',sans-serif;letter-spacing:.015em;margin:6px 0}
+.intro p{margin:0;color:var(--muted);font-size:13px;line-height:1.6;max-width:640px}
+.session{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pill{padding:7px 11px;border:1px solid var(--line);border-radius:40px;background:#10232a;color:#abc0c6;font-size:11px;font-weight:700;letter-spacing:.03em}
+.pill b{color:var(--text);font-variant-numeric:tabular-nums}
+.pill.calok b{color:var(--accent)} .pill.calno b{color:var(--amber)}
+.msg{background:#1b2a2e;border:1px solid #4b696f;border-radius:8px;color:#b9d2d1;font-size:12px;padding:10px 13px;margin-bottom:16px;line-height:1.5}
+.msg:empty{display:none}
+/* layout */
+.grid{display:grid;grid-template-columns:minmax(380px,1fr) minmax(480px,1.12fr);gap:18px;margin-bottom:18px}
+.panel{border:1px solid var(--line);background:linear-gradient(155deg,#12232a 0%,#0e1c24 100%);border-radius:15px;box-shadow:0 14px 28px rgba(0,0,0,.15);min-width:0;padding:20px 22px;position:relative}
+.panelhead{display:flex;justify-content:space-between;align-items:start;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.kicker{font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;font-weight:700;color:#a8bfc2}
+.panelhead h2{font-size:18px;letter-spacing:-.02em;margin:5px 0 0;font-weight:700}
+.helper{font-size:11px;color:var(--muted);line-height:1.5}
+.col{display:flex;flex-direction:column;gap:18px;min-width:0}
+/* segmented controls */
+.seg{display:inline-flex;border:1px solid var(--line2);border-radius:8px;overflow:hidden}
+.seg button{background:#10232a;color:var(--muted);border:0;border-right:1px solid var(--line2);padding:6px 10px;font-size:11px;font-weight:700}
+.seg button:last-child{border-right:0}
+.seg button.on{background:#1f3a43;color:var(--text)}
+.controlsrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.controlsrow label{font-size:10px;color:var(--faint);letter-spacing:.12em;text-transform:uppercase;font-weight:700}
+/* heat map */
+.mapwrap{position:relative;max-width:600px;margin:4px auto 0}
+#heatCanvas{display:block;width:100%;aspect-ratio:540/575;height:auto}
+.scalebar{display:flex;align-items:center;gap:10px;margin:8px auto 0;max-width:520px}
+.scalebar .ramp{flex:1;height:10px;border-radius:6px;background:linear-gradient(90deg,#12303a,#1d6a6a,#3aa38a,#8fd36b,#f2ffb0)}
+.scaleticks{display:flex;justify-content:space-between;max-width:520px;margin:4px auto 0;padding:0 0 0 58px;color:var(--muted);font-size:10.5px;font-variant-numeric:tabular-nums}
+.scalebar span{font-size:10.5px;color:var(--muted);white-space:nowrap;width:48px}
+.note{display:flex;gap:9px;border-top:1px solid var(--line);margin-top:14px;padding-top:12px;color:var(--muted);line-height:1.55;font-size:11px}
+.note .i{width:16px;height:16px;flex:none;border:1px solid #718e92;color:#a5c5c9;text-align:center;line-height:14px;border-radius:50%;font-weight:700;font-size:10px}
+/* GCT hero */
+.hero{display:grid;grid-template-columns:minmax(0,1fr) 210px;gap:16px;align-items:stretch}
+.big{font-family:'Barlow Condensed','Arial Narrow',sans-serif;font-size:clamp(84px,8.4vw,128px);font-weight:700;line-height:.9;letter-spacing:-.024em;font-variant-numeric:tabular-nums;margin-top:6px}
+.big small{font:600 28px 'Barlow Condensed',sans-serif;color:var(--muted);margin-left:6px}
+.delta{font-size:12px;color:var(--muted);margin-top:8px;font-variant-numeric:tabular-nums}
+.live{border:1px solid var(--line);border-radius:12px;background:#0f2128;padding:14px 15px;display:flex;flex-direction:column;justify-content:space-between;gap:8px}
+.live .lab{font-size:10px;color:var(--muted);letter-spacing:.14em;text-transform:uppercase;font-weight:700}
+.livephase{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px}
+.livephase i{width:10px;height:10px;border-radius:50%;background:#49616a;flex:none}
+.live.contact .livephase i{background:var(--accent);box-shadow:0 0 12px #bdef67aa}
+.livetimer{font:700 44px/1 'Barlow Condensed',sans-serif;font-variant-numeric:tabular-nums}
+.livetimer small{font-size:18px;color:var(--muted);margin-left:4px}
+.livebar{height:6px;border-radius:6px;background:#22393f;overflow:hidden}
+.livebar div{height:100%;width:0;background:var(--accent);border-radius:6px}
+.gaitbadge{align-self:flex-start;padding:4px 9px;border-radius:30px;font-size:11px;font-weight:700;border:1px solid var(--line2);color:var(--muted)}
+.gaitbadge.run{color:#071219;background:var(--accent);border-color:var(--accent)}
+.gaitbadge.walk{color:#071219;background:var(--amber);border-color:var(--amber)}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:18px}
+.stat{border:1px solid #2a444e;border-radius:10px;background:#152932;padding:11px 13px;min-width:0}
+.stat .value{font:700 clamp(28px,2.9vw,38px)/1 'Barlow Condensed','Arial Narrow',sans-serif;margin:8px 0 3px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.stat .value small{font:600 15px 'Barlow Condensed',sans-serif;margin-left:3px;color:var(--muted)}
+.stat .helper{font-size:10px}
+/* charts */
+.chartbox{position:relative}
+#gctChart{width:100%;height:180px;display:block}
+.tip{position:absolute;pointer-events:none;background:#08161bf2;border:1px solid var(--line2);border-radius:8px;padding:7px 10px;font-size:11.5px;line-height:1.5;color:var(--text);white-space:nowrap;display:none;z-index:5;box-shadow:0 8px 20px #0007}
+.tip b{font-variant-numeric:tabular-nums}
+.legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:11px}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.legend i{width:9px;height:9px;border-radius:3px;display:inline-block}
+.two{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:18px;margin-bottom:18px}
+.strikeNow{font:700 30px 'Barlow Condensed','Arial Narrow',sans-serif;margin:4px 0 2px}
+.strike{display:flex;width:100%;height:10px;border-radius:30px;overflow:hidden;background:#274048;margin:12px 0 8px;gap:2px}
+.strike>div{min-width:0;transition:flex .4s}
+#rollChart{width:100%;height:200px;display:block;margin-top:10px}
+#trace{width:100%;height:220px;display:block;margin-top:8px;cursor:crosshair}
+.axisnote{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;margin-top:3px}
+/* table */
+.tablewrap{overflow-x:auto}
+table.pads{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+.pads th{color:var(--muted);font-weight:700;text-align:right;padding:8px 8px;border-bottom:1px solid var(--line);font-size:10px;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap}
+.pads td{text-align:right;padding:9px 8px;border-bottom:1px solid #1e353c;white-space:nowrap}
+.pads th:first-child,.pads td:first-child{text-align:left}
+.pads td:first-child small{color:var(--muted);margin-left:6px}
+.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:8px;vertical-align:-1px}
+.minibar{display:inline-block;width:70px;height:7px;border-radius:5px;background:#263d44;vertical-align:1px;margin-left:8px;overflow:hidden}
+.minibar div{height:100%;width:0;border-radius:5px}
+/* setup guide */
+.setupGuide{border:1px solid var(--line);border-radius:12px;background:#102027;margin-bottom:18px}
+.setupGuide summary{padding:14px 20px;cursor:pointer;font-weight:700;font-size:12px;list-style:none;display:flex;gap:15px}
+.setupGuide summary::-webkit-details-marker{display:none}
+.setupGuide summary:after{content:'+';font-size:18px;color:var(--accent);margin-left:auto}
+.setupGuide[open] summary:after{content:'−'}
+.setupGuide summary span{color:var(--muted);font-weight:400}
+.setupGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 24px;border-top:1px solid var(--line);padding:18px 20px 20px}
+.setupGrid strong{color:var(--accent);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.setupGrid p{color:var(--muted);font-size:12px;line-height:1.65;margin:7px 0 0}
+.setupGrid code{font-size:11px;color:#dff5ea}
+.footnote{padding:0 2px 28px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;color:#75919a;font-size:11px;line-height:1.7}
+/* calibration overlay (same as 11/08) */
+.calOverlay{position:fixed;inset:0;background:#030a0dcc;backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;z-index:50;padding:16px}
+.calOverlay.open{display:flex}
+.calCard{width:min(720px,100%);max-height:calc(100vh - 32px);overflow:auto;border:1px solid var(--line2);border-radius:16px;background:linear-gradient(155deg,#132a31,#0d1c23);box-shadow:0 24px 60px #0008;padding:26px 28px 24px}
+.calTop{display:flex;justify-content:space-between;align-items:start;gap:12px}
+.calTop h2{font:700 30px/1.05 'Barlow Condensed','Arial Narrow',sans-serif;letter-spacing:.02em;margin:6px 0 0}
+.calClose{border:1px solid var(--line2);background:#13262d;color:var(--muted);border-radius:8px;width:34px;height:34px;font-size:18px;line-height:1}
+.calSteps{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:20px 0 18px}
+.calStep{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#10232a;color:var(--muted);font-size:11px;line-height:1.45}
+.calStep b{display:block;color:var(--text);font-size:13px;margin-bottom:2px}
+.calStep .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.calStep.active{border-color:var(--phase,#54d9d0);box-shadow:0 0 0 1px var(--phase,#54d9d0) inset;background:#132d33}
+.calStep.done{opacity:.6}
+.calNow{border:1px solid var(--line);border-radius:12px;padding:18px 20px;background:#0f2128;display:flex;align-items:center;gap:20px}
+.calCount{font:700 74px/1 'Barlow Condensed','Arial Narrow',sans-serif;min-width:66px;text-align:center;color:var(--phase,#54d9d0);font-variant-numeric:tabular-nums}
+.calText b{display:block;font-size:18px;margin-bottom:5px}
+.calText span{color:var(--muted);font-size:12.5px;line-height:1.55}
+.calBar{height:6px;border-radius:6px;background:#22393f;margin-top:14px;overflow:hidden}
+.calBar div{height:100%;width:0;background:var(--phase,#54d9d0);transition:width .2s linear}
+.calActions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px;flex-wrap:wrap}
+.calTable{width:100%;border-collapse:collapse;margin-top:16px;font-size:12px;font-variant-numeric:tabular-nums}
+.calTable th{color:var(--muted);font-weight:700;text-align:right;padding:7px 6px;border-bottom:1px solid var(--line);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+.calTable td{text-align:right;padding:8px 6px;border-bottom:1px solid #1e353c}
+.calTable th:first-child,.calTable td:first-child{text-align:left}
+.calTable td.ok{color:var(--accent)} .calTable td.warn{color:var(--amber)}
+.calNote{color:var(--muted);font-size:11.5px;line-height:1.6;margin-top:12px}
+@media(max-width:1180px){.grid{grid-template-columns:1fr}.two{grid-template-columns:1fr}.mapwrap{max-width:560px}}
+@media(max-width:640px){.shell{padding:0 12px}.hero{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.setupGrid{grid-template-columns:1fr}.calSteps{grid-template-columns:1fr}.panel{padding:16px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="shell">
+    <div class="brandgroup">
+      <svg class="brandicon" viewBox="0 0 48 48" role="img" aria-label="Kynetix K mark"><rect width="48" height="48" rx="12" fill="#bdef67"/><path d="M13 12v24M32 12 20 24l13 12" fill="none" stroke="#071219" stroke-width="5.5" stroke-linejoin="round" stroke-linecap="square"/></svg>
+      <div><div class="wordmark">KYNETIX</div><div class="brandtag">Run science / Prototype Lab</div></div>
+    </div>
+    <div class="topcontrols">
+      <div class="status" id="statusBox" role="status"><span class="statusdot"></span><span id="statusText">Not connected</span></div>
+      <button class="btn primary" id="btnBLE">Connect Bluetooth</button>
+      <button class="btn" id="btnConnect">Connect USB</button>
+      <button class="btn cal" id="btnCal">Calibrate</button>
+      <button class="btn" id="btnZero" title="Re-zero every pad with the foot lifted (3 s)">Zero</button>
+      <button class="btn" id="btnDemo">Demo run</button>
+      <button class="btn" id="btnReset" title="Clear steps and start a new run (keeps calibration)">New run</button>
+      <button class="btn export" id="btnExport" disabled>Samples CSV ↓</button>
+      <button class="btn export" id="btnExportSteps" disabled>Steps CSV ↓</button>
+    </div>
+  </div>
+</header>
+<div class="shell">
+  <div class="intro">
+    <div><div class="eyebrow">Movement, made measurable</div><h1>Run Lab · Capacitive Insole</h1><p>Live plantar heat map in picofarads, ground contact time and running gait metrics from the five-pad V6 flex insole.</p></div>
+    <div class="session">
+      <span class="pill">DEVICE <b>XIAO + 2× FDC1004</b></span>
+      <span class="pill">STREAM <b id="sampleRate">-- Hz</b></span>
+      <span class="pill">RUN CLOCK <b id="runClock">0:00</b></span>
+      <span class="pill">STEPS <b id="stepCount">0</b></span>
+      <span class="pill calno" id="calPillBox">CALIBRATION <b id="calPill">Not calibrated</b></span>
+    </div>
+  </div>
+  <div id="message" class="msg" role="alert"></div>
+
+  <main>
+  <div class="grid">
+    <!-- 01 HEAT MAP -->
+    <section class="panel">
+      <div class="panelhead">
+        <div><div class="kicker">01 / Plantar map</div><h2>Capacitance heat map · pF</h2></div>
+        <div class="controlsrow">
+          <div class="seg" id="segView" role="group" aria-label="Map view"><button data-v="live" class="on">Live</button><button data-v="peak">Last-step peak</button></div>
+          <label for="segScale">Scale</label>
+          <div class="seg" id="segScale" role="group" aria-label="Map scale"><button data-v="auto" class="on">Auto</button><button data-v="1">1</button><button data-v="2">2</button><button data-v="5">5</button><button data-v="10">10 pF</button></div>
+        </div>
+      </div>
+      <div class="mapwrap"><canvas id="heatCanvas" role="img" aria-label="Insole heat map of change in capacitance at five pads: big toe, first metatarsal, fifth metatarsal, lateral midfoot and heel. A table of the same values is below."></canvas></div>
+      <div class="scalebar"><span>ΔC, pF</span><div class="ramp"></div></div>
+      <div class="scaleticks"><span>0</span><span id="tickMid">--</span><span id="tickMax">--</span></div>
+      <div class="note"><span class="i">i</span><span>Colour = change in capacitance from each pad’s zero, on one shared pF scale (so pads can be compared). Readings under each pad’s noise floor are hidden on the map but kept in the table and CSV. White dot = estimated centre of pressure (CoP) from the five pads; the line is the CoP path of the last step. The map interpolates between five pads — it is <strong>not</strong> calibrated pressure.</span></div>
+    </section>
+
+    <!-- 02 GCT -->
+    <div class="col">
+      <section class="panel">
+        <div class="kicker">02 / Ground contact time</div>
+        <div class="hero">
+          <div>
+            <div class="helper" style="margin-top:8px">Last step · this foot</div>
+            <div class="big"><span id="gct">--</span><small>ms</small></div>
+            <div class="delta" id="gctDelta">Waiting for the first step</div>
+          </div>
+          <div class="live" id="liveBox">
+            <div class="lab">Right now</div>
+            <div class="livephase"><i></i><span id="phase">Waiting for data</span></div>
+            <div class="livetimer"><span id="liveMs">--</span><small>ms</small></div>
+            <div class="livebar"><div id="liveBar"></div></div>
+            <div class="gaitbadge" id="gaitBadge">Gait: --</div>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="kicker">Avg GCT · 10</div><div class="value"><span id="avg">--</span><small>ms</small></div><div class="helper">Last 10 valid steps</div></div>
+          <div class="stat"><div class="kicker">Cadence</div><div class="value"><span id="cad">--</span><small>spm</small></div><div class="helper">2 × this foot’s stride rate</div></div>
+          <div class="stat"><div class="kicker">Flight · est.</div><div class="value"><span id="flight">--</span><small>ms</small></div><div class="helper">Stride ÷ 2 − GCT (symmetric gait)</div></div>
+          <div class="stat"><div class="kicker">Duty factor</div><div class="value"><span id="duty">--</span><small>%</small></div><div class="helper">GCT ÷ stride time</div></div>
+          <div class="stat"><div class="kicker">Stride time</div><div class="value"><span id="stride">--</span><small>ms</small></div><div class="helper">Touchdown → next touchdown</div></div>
+          <div class="stat"><div class="kicker">GCT variability</div><div class="value"><span id="cv">--</span><small>% CV</small></div><div class="helper">SD ÷ mean, last 10</div></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panelhead"><div><div class="kicker">03 / Step history</div><h2>GCT per step</h2></div>
+          <div class="legend"><span><i style="background:var(--p4)"></i>Heel strike</span><span><i style="background:var(--p3)"></i>Midfoot</span><span><i style="background:var(--p0)"></i>Forefoot</span><span><i style="background:#56707a"></i>Unclassified</span></div></div>
+        <div class="chartbox"><svg id="gctChart" viewBox="0 0 640 180" preserveAspectRatio="none" aria-label="Ground contact time for the last 40 steps"></svg><div class="tip" id="gctTip"></div></div>
+        <div class="axisnote"><span id="gctOld">Older</span><span>Dashed line = average of the steps shown</span><span>Latest</span></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="two">
+    <!-- 04 STRIKE + ROLL-OFF -->
+    <section class="panel">
+      <div class="panelhead"><div><div class="kicker">04 / Foot strike &amp; roll-off</div><div class="strikeNow" id="strikeNow">--</div><div class="helper" id="rollSummary">First pad to load · latest step</div></div></div>
+      <div class="strike" aria-label="Strike distribution over last 20 steps"><div id="sbHeel" style="flex:1;background:var(--p4)"></div><div id="sbMid" style="flex:1;background:var(--p3)"></div><div id="sbFore" style="flex:1;background:var(--p0)"></div></div>
+      <div class="legend" id="strikeLegend"><span><i style="background:var(--p4)"></i>Heel <b id="nHeel">0</b></span><span><i style="background:var(--p3)"></i>Mid <b id="nMid">0</b></span><span><i style="background:var(--p0)"></i>Fore <b id="nFore">0</b></span><span style="margin-left:auto">last 20 steps</span></div>
+      <div class="chartbox"><svg id="rollChart" viewBox="0 0 520 200" aria-label="When each pad was loaded during the last contact"></svg><div class="tip" id="rollTip"></div></div>
+      <div class="helper" style="margin-top:6px">Bars show when each pad was above its contact level during the last ground contact (0 = touchdown, right edge = toe-off). Number = that pad’s peak in pF.</div>
+    </section>
+    <!-- 05 TRACES -->
+    <section class="panel">
+      <div class="panelhead"><div><div class="kicker">05 / Signal timeline</div><h2>Pad capacitance · last 5 s</h2></div>
+        <div class="legend" id="traceLegend"></div></div>
+      <canvas id="trace" aria-label="Change in capacitance of each pad over the last five seconds"></canvas>
+      <div class="axisnote"><span>5 s ago</span><span>Shaded = ground contact · hover for values</span><span>Now</span></div>
+      <div class="helper" id="hint" style="margin-top:10px">Upload Kynetix_Flex5_XIAO_FDC1004_BLE_USB.ino, keep the insole unloaded for 2 s after power-on, then press Connect Bluetooth (Chrome or Edge). USB is the fallback. Try Demo run to see the layout without hardware.</div>
+    </section>
+  </div>
+
+  <!-- 06 TABLE -->
+  <section class="panel" style="margin-bottom:18px">
+    <div class="panelhead"><div><div class="kicker">06 / Pads</div><h2>Per-pad readings</h2></div><span class="helper">Live values update continuously; step columns update at each toe-off.</span></div>
+    <div class="tablewrap"><table class="pads"><thead><tr><th>Pad</th><th>Live ΔC</th><th>Peak · last step</th><th>Avg peak · 10</th><th>Share of load</th><th>Loaded at</th><th>Contact · last step</th></tr></thead><tbody id="padRows"></tbody></table></div>
+  </section>
+  </main>
+
+  <details class="setupGuide">
+    <summary>Connection &amp; sensor setup <span>XIAO nRF52840 + 2× FDC1004 / V6 flex, five pads</span></summary>
+    <div class="setupGrid">
+      <div><strong>1 / Prepare the device</strong><p>Upload <code>Kynetix_Flex5_XIAO_FDC1004_BLE_USB.ino</code> with <code>NUM_FDC = 2</code>. FDC A: SDA → D4, SCL → D5. FDC B: SDA → D2, SCL → D3. Shield pins (SH) go to SHLD1, never GND. Power up with the insole unloaded for 2 s.</p></div>
+      <div><strong>2 / Connect</strong><p>Chrome or Edge. <em>Connect Bluetooth</em> → choose <code>Kynetix Cap Insole</code>. For USB, close the Arduino Serial Monitor first, then <em>Connect USB</em>. If Bluetooth is blocked when opening the file directly, serve the folder from localhost (e.g. <code>python -m http.server</code>).</p></div>
+      <div><strong>3 / Check pads</strong><p>Heel = flex S1 (pin 13) · lateral midfoot = S2 (pin 11) · 5th met = S3 (pin 8) · 1st met = S4 (pin 3) · big toe = S5 (pin 6). Press each pad and check that spot lights up. With one FDC1004 set <code>FIVE_PADS = false</code> in this file.</p></div>
+      <div><strong>4 / Calibrate, then run</strong><p>Shoe on and laced: <em>Calibrate</em> (lift 3 s, stand 5 s, lift and hold). Then press <em>New run</em> and start running. Use <em>Zero</em> any time a pad reads above 0 with the foot in the air.</p></div>
+      <div><strong>5 / Reading the metrics</strong><p>GCT is decided here from the pad values. Cadence, flight time and duty factor come from one foot and assume left/right symmetry. Flight time ≤ 0 means walking (no airborne phase), shown as “Walking”.</p></div>
+      <div><strong>6 / Exports</strong><p><em>Samples CSV</em> = every sample as received (fF) with the contact flag decided here. <em>Steps CSV</em> = one row per step: GCT, stride, flight, duty factor, strike, and each pad’s peak (pF) and load timing.</p></div>
+    </div>
+  </details>
+
+  <div class="calOverlay" id="calOverlay" role="dialog" aria-modal="true" aria-labelledby="calTitle">
+    <div class="calCard">
+      <div class="calTop"><div><div class="kicker">Per-pad calibration · about 15 s</div><h2 id="calTitle">Calibrate this insole</h2></div><button class="calClose" id="calClose" aria-label="Close">×</button></div>
+      <div class="calSteps">
+        <div class="calStep" id="cs1"><b><span class="dot" style="background:#54a8ff"></span>1 · Lift</b>Foot lifted, 3 s. Sets each pad’s zero.</div>
+        <div class="calStep" id="cs2"><b><span class="dot" style="background:#bdef67"></span>2 · Stand</b>Stand on this foot, 5 s. Sets each pad’s full-load level.</div>
+        <div class="calStep" id="cs3"><b><span class="dot" style="background:#ff805f"></span>3 · Lift &amp; hold</b>Lift the foot and hold it up. Measures how fast each pad releases.</div>
+      </div>
+      <div class="calNow"><div class="calCount" id="calCount">·</div><div class="calText"><b id="calHead">Before you start</b><span id="calSub">Put the shoe on and lace it as you will run. Stand next to something to hold on to, and keep the insole connected (data must be streaming).</span></div></div>
+      <div class="calBar"><div id="calBar"></div></div>
+      <div id="calResults"></div>
+      <div class="calActions"><button class="btn" id="calCancel">Cancel</button><button class="btn primary" id="calStart">Start calibration</button></div>
+    </div>
+  </div>
+  <footer class="footnote"><span>KYNETIX / PROTOTYPE ANALYTICS — FOR ENGINEERING TESTING, NOT CLINICAL DIAGNOSIS</span><span>Stream: t_ms, S1..S5 (fF), contact · BLE or USB · shown in pF</span></footer>
+</div>
+
+<script>
+'use strict';
+// ============================ PADS ============================
+// slot = position in the firmware's 5-value packet. x,y = pad centre on the map (540 x 575 drawing).
+const FIVE_PADS = true;   // false if the firmware runs with NUM_FDC = 1 (lateral midfoot always 0)
+const SENSORS = [
+  {id:'Big toe',  cin:'flex S5', slot:0, region:'fore', pin:'tail pin 6',  x:194,y:104, lx:350,ly:96,  color:'#76a62a'},
+  {id:'1st met',  cin:'flex S4', slot:3, region:'fore', pin:'tail pin 3',  x:180,y:200, lx:350,ly:184, color:'#8a6be6'},
+  {id:'5th met',  cin:'flex S3', slot:2, region:'fore', pin:'tail pin 8',  x:270,y:212, lx:350,ly:268, color:'#c4841c'},
+  {id:'Lat. mid', cin:'flex S2', slot:1, region:'mid',  pin:'tail pin 11', x:264,y:350, lx:350,ly:366, color:'#00998f'},
+  {id:'Heel',     cin:'flex S1', slot:4, region:'heel', pin:'tail pin 13', x:220,y:480, lx:350,ly:472, color:'#e35a35'}
+].filter(s=>FIVE_PADS||s.slot!==1);
+const N=SENSORS.length, FW_SLOTS=5;
+const pickSlots=v=>SENSORS.map(s=>v[s.slot]);
+const REGION_COLOR={heel:'#e35a35',mid:'#00998f',fore:'#76a62a',unknown:'#56707a'};
+const REGION_NAME={heel:'Heel strike',mid:'Midfoot strike',fore:'Forefoot strike',unknown:'Unclassified'};
+
+// ============================ DETECTION SETTINGS (fF, same as 11/08 v6) ============================
+const TOTAL_ON=200,TOTAL_OFF=100;
+const SENSOR_ON=150,SENSOR_OFF=80,NOISE_FLOOR_FF=60,MIN_STEP_MS=80,MAX_STEP_MS=2500;
+const USE_FIRMWARE_FLAG=false;
+const END_FRAC=0.10, ENGAGED_FF=60, SENSOR_FLOOR_FF=40;
+const CALT={ZERO:3000,STAND:5000,SETTLE:1500,LIFT_WAIT:6000,HOLD:1500,REL_AT:50};
+const MIN_RANGE_FF=80,N_ON=0.30,N_OFF=0.12,ENGAGED_FRAC=0.15;
+const AUTO_ZERO=true, AIR_SETTLE_MS=150, TRACK_DOWN=0.2, TRACK_UP=0.01, MAX_CONTACT_MS=3000, STUCK_FRAC=0.75;
+
+const $=id=>document.getElementById(id), NS='http://www.w3.org/2000/svg';
+function svg(tag,attrs,parent){const n=document.createElementNS(NS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);if(parent)parent.appendChild(n);return n;}
+const pF=fF=>fF/1000;
+function fmtPF(fF){const v=fF/1000;return Math.abs(v)>=10?v.toFixed(1):v.toFixed(2);}
+
+// ============================ STATE ============================
+let load=Array(N).fill(0),smooth=Array(N).fill(0),peak=Array(N).fill(750);
+let on=Array(N).fill(false),onset=Array(N).fill(null),stepSensorMs=Array(N).fill(0),lastRise=Array(N).fill(null);
+let stepOn=false,stepStart=0,firstSensor=-1,fallbackOn=false;
+let stepPeak=Array(N).fill(0),stepOnT=Array(N).fill(null),stepOffT=Array(N).fill(null),copTrail=[];
+let steps=[],trace=[],history=[],recentTimes=[];let lastT=null,lastReceiveAt=0,samples=0,stepNo=0,lastToeOffT=null,runStartT=null;
+let port=null,reader=null,readTask=null,connecting=false,disconnecting=false,demoTimer=null,demoT=0,connectedAt=0;
+let bleDevice=null,bleCharacteristic=null,bleConnecting=false,bleLastSeq=null,bleDropped=0,bleTimestampBase=0,bleLastRawT=null;
+const maxHistory=30000;
+let zeroOff=Array(N).fill(0),relLevel=null;
+let wIn=false,wPeak=0,wFloor=0,wSPeak=Array(N).fill(0),wStartT=0,lastContactT=null;
+let calRun=null,calResults=[],calLastTime=null;
+let calRange=null,calNoise=null,calFloor=null,sOnLvl=null,sOffLvl=null,calUse=null;
+let mapView='live',mapScale='auto',autoScaleF=1000;
+const floorOf=i=>calFloor?calFloor[i]:NOISE_FLOOR_FF;
+
+function setStatus(mode,label){$('statusBox').className='status '+(mode||'');$('statusText').textContent=label;}
+function notify(msg){$('message').textContent=msg||'';}
+
+// ============================ CONTACT DETECTION (unchanged logic) ============================
+function webContactReset(){wIn=false;wPeak=0;wFloor=0;wSPeak=Array(N).fill(0);}
+function webContact(v,total){
+  if(calRange&&!demoTimer)return webContactNorm(v);
+  const levels=demoTimer?null:relLevel;
+  if(!wIn){
+    if(total<wFloor)wFloor=total;
+    if(total>TOTAL_ON&&total-wFloor>TOTAL_ON){wIn=true;wPeak=total;wSPeak=v.slice();wStartT=lastT;}
+  }else{
+    if(total>wPeak)wPeak=total;
+    for(let i=0;i<N;i++)if(v[i]>wSPeak[i])wSPeak[i]=v[i];
+    let released;
+    if(!levels){released=total<Math.max(TOTAL_OFF,END_FRAC*wPeak);}
+    else{
+      released=true;
+      for(let i=0;i<N;i++){
+        if(wSPeak[i]<ENGAGED_FF)continue;
+        const lvl=Math.max(SENSOR_FLOOR_FF,levels[i]*wSPeak[i]);
+        if(v[i]>=lvl){released=false;break;}
+      }
+      if(total<TOTAL_OFF)released=true;
+    }
+    if(lastT-wStartT>MAX_CONTACT_MS)released=true;
+    if(released){wIn=false;wFloor=total;}
+  }
+  return wIn;
+}
+function webContactNorm(v){
+  const n=v.map((x,i)=>Math.min(1.5,x/calRange[i]));
+  const tot=n.reduce((a,b)=>a+b,0);
+  if(!wIn){
+    if(tot<wFloor)wFloor=tot;
+    if(tot>N_ON&&tot-wFloor>N_ON){wIn=true;wPeak=tot;wSPeak=n.slice();wStartT=lastT;}
+  }else{
+    if(tot>wPeak)wPeak=tot;
+    for(let i=0;i<N;i++)if(n[i]>wSPeak[i])wSPeak[i]=n[i];
+    let released=true;
+    for(let i=0;i<N;i++){
+      if(wSPeak[i]<ENGAGED_FRAC)continue;
+      if(calUse&&!calUse[i])continue;
+      const floorFrac=Math.max(SENSOR_FLOOR_FF,3*calNoise[i])/calRange[i];
+      const lvl=Math.max(floorFrac,relLevel[i]*wSPeak[i]);
+      if(n[i]>=lvl){released=false;break;}
+    }
+    if(tot<N_OFF)released=true;
+    if(lastT-wStartT>MAX_CONTACT_MS)released=true;
+    if(released){wIn=false;wFloor=tot;}
+  }
+  return wIn;
+}
+
+// ============================ STEP PROCESSING ============================
+function clearStepTrack(){stepPeak.fill(0);stepOnT.fill(null);stepOffT.fill(null);copTrail=[];}
+function resetAll(){
+  load.fill(0);smooth.fill(0);for(let i=0;i<N;i++)peak[i]=calRange?calRange[i]:750;
+  on.fill(false);onset.fill(null);stepSensorMs.fill(0);lastRise.fill(null);clearStepTrack();
+  stepOn=false;stepStart=0;firstSensor=-1;fallbackOn=false;webContactReset();
+  steps=[];trace=[];history=[];recentTimes=[];lastT=null;lastReceiveAt=0;samples=0;stepNo=0;lastToeOffT=null;runStartT=null;autoScaleF=1000;
+  ['gct','avg','cad','flight','duty','stride','cv'].forEach(id=>$(id).textContent='--');
+  $('gctDelta').textContent='Waiting for the first step';$('stepCount').textContent='0';$('runClock').textContent='0:00';
+  $('phase').textContent='Waiting for data';$('liveMs').textContent='--';$('strikeNow').textContent='--';$('sampleRate').textContent='-- Hz';
+  $('gaitBadge').className='gaitbadge';$('gaitBadge').textContent='Gait: --';
+  $('btnExport').disabled=true;$('btnExportSteps').disabled=true;
+  ['sbHeel','sbMid','sbFore'].forEach(id=>$(id).style.flex='1');['nHeel','nMid','nFore'].forEach(id=>$(id).textContent='0');
+  drawGctChart();drawRoll();updateTableSteps();
+}
+function completeStep(t){
+  const d=t-stepStart;
+  for(let i=0;i<N;i++)if(onset[i]!==null){stepSensorMs[i]+=Math.max(0,t-onset[i]);onset[i]=null;}
+  if(d>=MIN_STEP_MS&&d<MAX_STEP_MS){
+    const prev=steps.at(-1);
+    let stride=prev?stepStart-prev.start:null;if(stride!==null&&(stride<250||stride>2500))stride=null;
+    // toe-off pad = pad that stayed loaded the latest
+    let toe=-1,best=-1;for(let i=0;i<N;i++)if(stepOffT[i]!==null&&stepOffT[i]>best){best=stepOffT[i];toe=i;}
+    steps.push({n:++stepNo,gct:d,start:stepStart,first:firstSensor,toe,stride,durations:stepSensorMs.slice(),peaks:stepPeak.slice(),onT:stepOnT.slice(),offT:stepOffT.slice(),cop:copTrail.slice()});
+    if(steps.length>400)steps.shift();
+    if(runStartT===null)runStartT=stepStart;
+    updateStats();
+  }
+  lastToeOffT=t;
+  stepOn=false;firstSensor=-1;stepSensorMs.fill(0);on.fill(false);onset.fill(null);lastRise.fill(null);
+}
+function identifyFirstSensor(t){
+  const c=SENSORS.map((_,i)=>i).filter(i=>on[i]&&lastRise[i]!==null&&t-lastRise[i]>=0&&t-lastRise[i]<=120);
+  if(!c.length)return -1;
+  const ft=Math.min(...c.map(i=>lastRise[i])),earliest=c.filter(i=>lastRise[i]===ft);
+  if(new Set(earliest.map(i=>SENSORS[i].region)).size>1)return -1;
+  return earliest.sort((a,b)=>load[b]-load[a])[0];
+}
+function copOf(v){let w=0,x=0,y=0;for(let i=0;i<N;i++){const a=Math.max(0,v[i]-floorOf(i));w+=a;x+=a*SENSORS[i].x;y+=a*SENSORS[i].y;}return w>0?{x:x/w,y:y/w,w}:null;}
+function processSample(t,vals,contactFlag){
+  if(!Number.isFinite(t)||!vals||vals.length!==N||vals.some(x=>!Number.isFinite(x)))return;
+  if(lastT!==null&&(t<lastT||t-lastT>800)){
+    stepOn=false;firstSensor=-1;fallbackOn=false;on.fill(false);onset.fill(null);stepSensorMs.fill(0);lastRise.fill(null);recentTimes=[];clearStepTrack();webContactReset();
+  }
+  lastT=t;lastReceiveAt=performance.now();samples++;
+  const rawVals=vals.map(x=>Math.max(0,x));
+  for(let i=0;i<N;i++){load[i]=Math.max(0,rawVals[i]-zeroOff[i]);peak[i]=Math.max(calRange?calRange[i]:750,peak[i]*.9997,load[i]);}
+  const total=load.reduce((a,b)=>a+b,0);
+  if(calRun)calSample(t,load,total,rawVals);
+  if(USE_FIRMWARE_FLAG&&(contactFlag===0||contactFlag===1))fallbackOn=contactFlag===1;
+  else fallbackOn=calRun?false:webContact(load,total);
+  const contact=fallbackOn;
+  if(AUTO_ZERO&&!calRun&&!demoTimer){
+    if(contact)lastContactT=t;
+    else if(lastContactT===null||t-lastContactT>=AIR_SETTLE_MS){
+      for(let i=0;i<N;i++){const r=rawVals[i];zeroOff[i]+=(r<zeroOff[i]?TRACK_DOWN:TRACK_UP)*(r-zeroOff[i]);}
+    }
+  }
+  for(let i=0;i<N;i++){
+    const was=on[i],onL=sOnLvl?sOnLvl[i]:SENSOR_ON,offL=sOffLvl?sOffLvl[i]:SENSOR_OFF;
+    if(!was&&load[i]>onL){on[i]=true;lastRise[i]=t;}
+    else if(was&&load[i]<offL)on[i]=false;
+  }
+  if(!stepOn&&contact){stepOn=true;stepStart=t;stepSensorMs.fill(0);onset.fill(null);clearStepTrack();firstSensor=identifyFirstSensor(t);}
+  if(stepOn){
+    for(let i=0;i<N;i++){
+      if(on[i]&&onset[i]===null)onset[i]=t;
+      else if(!on[i]&&onset[i]!==null){stepSensorMs[i]+=Math.max(0,t-onset[i]);onset[i]=null;}
+      if(load[i]>stepPeak[i])stepPeak[i]=load[i];
+      if(on[i]){if(stepOnT[i]===null)stepOnT[i]=t-stepStart;stepOffT[i]=t-stepStart;}
+    }
+    const c=copOf(load);if(c)copTrail.push([c.x,c.y]);
+    if(firstSensor<0&&t-stepStart<=60)firstSensor=identifyFirstSensor(t);
+  }
+  if(stepOn&&!contact)completeStep(t);
+  trace.push({t,v:load.slice(),c:contact});if(trace.length>500)trace.shift();
+  history.push([Math.round(t),...rawVals.map(Math.round),contact?1:0]);
+  if(history.length>maxHistory)history.splice(0,5000);
+  if(samples%25===1){$('btnExport').disabled=history.length===0;}
+  recentTimes.push(t);if(recentTimes.length>101)recentTimes.shift();
+  if(samples%20===0&&recentTimes.length>1){const dt=recentTimes.at(-1)-recentTimes[0];$('sampleRate').textContent=dt>0?`${(1000*(recentTimes.length-1)/dt).toFixed(0)} Hz`:'-- Hz';}
+}
+
+// ============================ METRICS ============================
+const mean=a=>a.reduce((x,y)=>x+y,0)/a.length;
+function metrics(){
+  const r=steps.slice(-10),g=r.map(s=>s.gct),avg=g.length?mean(g):null;
+  const st=steps.slice(-8).map(s=>s.stride).filter(x=>x!==null),stride=st.length?mean(st):null;
+  const sd=g.length>2?Math.sqrt(mean(g.map(x=>(x-avg)**2))):null;
+  return {avg,stride,cad:stride?120000/stride:null,flight:stride&&avg?stride/2-avg:null,duty:stride&&avg?100*avg/stride:null,cv:sd!==null?100*sd/avg:null};
+}
+function updateStats(){
+  if(!steps.length)return;
+  const last=steps.at(-1),m=metrics();
+  $('gct').textContent=Math.round(last.gct);
+  $('stepCount').textContent=steps.length>=400?stepNo:steps.length;
+  $('avg').textContent=m.avg?Math.round(m.avg):'--';
+  if(m.avg&&steps.length>1){const d=last.gct-m.avg;$('gctDelta').textContent=`${d>=0?'+':'−'}${Math.abs(Math.round(d))} ms vs 10-step average · step #${last.n}`;}
+  else $('gctDelta').textContent=`Step #${last.n}`;
+  $('cad').textContent=m.cad?Math.round(m.cad):'--';
+  $('stride').textContent=m.stride?Math.round(m.stride):'--';
+  $('duty').textContent=m.duty?m.duty.toFixed(0):'--';
+  $('cv').textContent=m.cv!==null?m.cv.toFixed(1):'--';
+  const b=$('gaitBadge');
+  if(m.flight===null){$('flight').textContent='--';b.className='gaitbadge';b.textContent='Gait: --';}
+  else if(m.flight>0){$('flight').textContent=Math.round(m.flight);b.className='gaitbadge run';b.textContent='Running';}
+  else{$('flight').textContent='0';b.className='gaitbadge walk';b.textContent='Walking';}
+  // strike
+  const cat=i=>i<0?'unknown':SENSORS[i].region,c=cat(last.first);
+  $('strikeNow').textContent=REGION_NAME[c];
+  const tally={heel:0,mid:0,fore:0};steps.slice(-20).forEach(s=>{const r=cat(s.first);if(r in tally)tally[r]++;});
+  $('sbHeel').style.flex=String(tally.heel||.0001);$('sbMid').style.flex=String(tally.mid||.0001);$('sbFore').style.flex=String(tally.fore||.0001);
+  $('nHeel').textContent=tally.heel;$('nMid').textContent=tally.mid;$('nFore').textContent=tally.fore;
+  $('rollSummary').textContent=`Touchdown: ${last.first>=0?SENSORS[last.first].id:'unclear'} · toe-off: ${last.toe>=0?SENSORS[last.toe].id:'unclear'} · ${Math.round(last.gct)} ms`;
+  $('btnExportSteps').disabled=false;
+  drawGctChart();drawRoll();updateTableSteps();
+}
+
+// ============================ HEAT MAP (canvas) ============================
+const SOLE='M220 540 C175 540 160 510 162 470 C164 420 180 380 182 340 C184 300 150 260 148 200 C146 130 170 65 215 60 C260 56 300 120 298 200 C296 280 285 350 280 400 C276 450 282 490 275 515 C268 535 245 540 220 540 Z';
+const solePath=new Path2D(SOLE);
+const MW=540,MH=575,GS=4,GW=Math.ceil(MW/GS),GH=Math.ceil(MH/GS),SIGMA=36;
+const hc=$('heatCanvas'),hx=hc.getContext('2d');
+const off=document.createElement('canvas');off.width=GW;off.height=GH;const ox=off.getContext('2d');const img=ox.createImageData(GW,GH);
+const RAMP=[[0,[18,48,58]],[.25,[29,106,106]],[.5,[58,163,138]],[.75,[143,211,107]],[1,[242,255,176]]];
+function rampRGB(t){t=Math.max(0,Math.min(1,t));for(let k=1;k<RAMP.length;k++){if(t<=RAMP[k][0]){const [a,ca]=RAMP[k-1],[b,cb]=RAMP[k],f=(t-a)/(b-a);return [0,1,2].map(j=>Math.round(ca[j]+(cb[j]-ca[j])*f));}}return RAMP.at(-1)[1];}
+const rgbStr=c=>`rgb(${c[0]},${c[1]},${c[2]})`;
+// precompute pad weights per grid cell
+const kern=SENSORS.map(s=>{const k=new Float32Array(GW*GH);for(let gy=0;gy<GH;gy++)for(let gx=0;gx<GW;gx++){const dx=gx*GS+GS/2-s.x,dy=gy*GS+GS/2-s.y;k[gy*GW+gx]=Math.exp(-(dx*dx+dy*dy)/(2*SIGMA*SIGMA));}return k;});
+function mapValues(){
+  if(mapView==='peak'){const s=steps.at(-1);return s?s.peaks.map((p,i)=>Math.max(0,p-floorOf(i))):Array(N).fill(0);}
+  return smooth.map((v,i)=>Math.max(0,v-floorOf(i)));
+}
+function scaleF(){return mapScale==='auto'?autoScaleF:Number(mapScale)*1000;}
+function updateAutoScale(){
+  const recent=steps.slice(-10);let target=Math.max(...(recent.length?recent.flatMap(s=>s.peaks):[0]),...smooth);
+  target=Math.max(300,target*1.05);
+  autoScaleF+=(target-autoScaleF)*(target>autoScaleF?0.15:0.01);
+}
+function sizeCanvas(c,ctx,w,h){const dpr=window.devicePixelRatio||1;if(c.width!==Math.round(w*dpr)||c.height!==Math.round(h*dpr)){c.width=Math.round(w*dpr);c.height=Math.round(h*dpr);}ctx.setTransform(dpr,0,0,dpr,0,0);}
+function drawHeat(){
+  const w=hc.clientWidth;if(!w)return;const s=w/MW;
+  sizeCanvas(hc,hx,w,w*MH/MW);hx.save();hx.scale(s,s);hx.clearRect(0,0,MW,MH);
+  const vals=mapValues(),S=scaleF(),d=img.data;
+  for(let p=0;p<GW*GH;p++){
+    let v=0;for(let i=0;i<N;i++)v+=vals[i]*kern[i][p];
+    const t=v/S,c=rampRGB(t),a=t<0.015?0:Math.min(1,(t-0.015)/0.1);
+    d[p*4]=c[0];d[p*4+1]=c[1];d[p*4+2]=c[2];d[p*4+3]=Math.round(a*245);
+  }
+  ox.putImageData(img,0,0);
+  hx.fillStyle='#162a31';hx.fill(solePath);
+  hx.save();hx.clip(solePath);hx.imageSmoothingEnabled=true;hx.imageSmoothingQuality='high';hx.drawImage(off,0,0,GW*GS,GH*GS);
+  // region guides
+  hx.strokeStyle='rgba(120,160,168,.28)';hx.lineWidth=.8;hx.setLineDash([4,7]);
+  hx.beginPath();hx.moveTo(150,170);hx.quadraticCurveTo(220,190,300,170);hx.moveTo(165,290);hx.quadraticCurveTo(220,305,295,285);hx.moveTo(160,420);hx.quadraticCurveTo(220,438,285,420);hx.stroke();hx.setLineDash([]);
+  // CoP trail of last step
+  const last=steps.at(-1);
+  if(last&&last.cop.length>1){hx.strokeStyle='rgba(255,255,255,.75)';hx.lineWidth=2;hx.lineJoin='round';hx.beginPath();last.cop.forEach(([x,y],k)=>k?hx.lineTo(x,y):hx.moveTo(x,y));hx.stroke();
+    const [ex,ey]=last.cop.at(-1);hx.fillStyle='#fff';hx.beginPath();hx.moveTo(ex,ey-6);hx.lineTo(ex-4,ey+2);hx.lineTo(ex+4,ey+2);hx.closePath();hx.fill();}
+  hx.restore();
+  hx.strokeStyle='#4a6a72';hx.lineWidth=2;hx.stroke(solePath);
+  // pads + labels
+  SENSORS.forEach((p,i)=>{
+    const shown=mapView==='peak'?(last?last.peaks[i]:0):load[i];
+    hx.strokeStyle='rgba(144,171,179,.5)';hx.lineWidth=1;hx.setLineDash([3,5]);hx.beginPath();hx.moveTo(p.x+17,p.y);hx.lineTo(p.lx-12,p.ly);hx.stroke();hx.setLineDash([]);
+    hx.lineWidth=on[i]&&mapView==='live'?3:2;hx.strokeStyle=p.color;hx.beginPath();hx.arc(p.x,p.y,15,0,Math.PI*2);hx.stroke();
+    hx.fillStyle=p.color;hx.beginPath();hx.arc(p.lx-4,p.ly-11,4.5,0,Math.PI*2);hx.fill();
+    hx.fillStyle='#c9e2e1';hx.font="700 13px 'DM Sans',sans-serif";hx.fillText(p.id+' · '+p.cin,p.lx+5,p.ly-7);
+    hx.fillStyle=on[i]&&mapView==='live'?'#f0f8f6':'#9fbcc2';hx.font="700 24px 'Barlow Condensed',sans-serif";hx.fillText(fmtPF(shown)+' pF',p.lx-8,p.ly+18);
+  });
+  // live CoP
+  if(mapView==='live'){const c=copOf(smooth);if(c&&c.w>30){hx.fillStyle='#fff';hx.strokeStyle='#071219';hx.lineWidth=2.5;hx.beginPath();hx.arc(c.x,c.y,7,0,7);hx.fill();hx.stroke();}}
+  hx.fillStyle='#87a8a9';hx.font="12px 'DM Sans',sans-serif";hx.textAlign='center';hx.fillText('T O E',222,40);hx.fillText('H E E L',222,566);hx.textAlign='left';
+  hx.fillStyle='#6f8c94';hx.font="11px 'DM Sans',sans-serif";hx.fillText(mapView==='peak'?(last?`Peak of step #${last.n}`:'No step yet'):'Live',14,22);
+  hx.restore();
+  $('tickMid').textContent=(S/2000).toFixed(S/2000>=10?1:2);$('tickMax').textContent=(S/1000).toFixed(S/1000>=10?1:2)+' pF';
+}
+
+// ============================ GCT BAR CHART (svg) ============================
+function drawGctChart(){
+  const e=$('gctChart');e.replaceChildren();const W=640,H=180,L=36,R=8,T=12,B=20;
+  const data=steps.slice(-40);
+  if(!data.length){const t=svg('text',{x:W/2,y:H/2,'text-anchor':'middle',fill:'#799aa1','font-size':12},e);t.textContent='Waiting for steps';return;}
+  const g=data.map(s=>s.gct),hi=Math.max(...g),lo=0,top=Math.ceil((hi*1.15)/50)*50;
+  const y=v=>T+(H-T-B)*(1-(v-lo)/(top-lo));
+  for(let k=0;k<=4;k++){const v=top*k/4,yy=y(v);svg('line',{x1:L,x2:W-R,y1:yy,y2:yy,stroke:'#22393f','stroke-width':1},e);const tx=svg('text',{x:L-6,y:yy+3,'text-anchor':'end',fill:'#6f8c94','font-size':10},e);tx.textContent=Math.round(v);}
+  const slotW=(W-L-R)/40,bw=Math.max(3,slotW-2),x0=W-R-data.length*slotW;
+  const tip=$('gctTip');
+  data.forEach((s,k)=>{
+    const reg=s.first<0?'unknown':SENSORS[s.first].region,x=x0+k*slotW+(slotW-bw)/2,yy=y(s.gct),h=Math.max(2,y(0)-yy);
+    svg('path',{d:`M${x},${y(0)} V${yy+3} q0,-3 3,-3 h${bw-6} q3,0 3,3 V${y(0)} Z`,fill:REGION_COLOR[reg],opacity:k===data.length-1?1:.82},e);
+    const hit=svg('rect',{x:x0+k*slotW,y:T,width:slotW,height:H-T-B,fill:'transparent'},e);
+    hit.addEventListener('mousemove',ev=>{
+      const box=e.parentNode.getBoundingClientRect();
+      tip.innerHTML=`Step <b>#${s.n}</b><br>GCT <b>${Math.round(s.gct)} ms</b><br>${REGION_NAME[reg]}${s.stride?`<br>Stride <b>${Math.round(s.stride)} ms</b>`:''}`;
+      tip.style.display='block';const tx=ev.clientX-box.left+12;tip.style.left=Math.min(tx,box.width-150)+'px';tip.style.top=(ev.clientY-box.top-60)+'px';
+    });
+    hit.addEventListener('mouseleave',()=>tip.style.display='none');
+  });
+  const a=mean(g),ya=y(a);
+  svg('line',{x1:L,x2:W-R,y1:ya,y2:ya,stroke:'#f0f8f6','stroke-width':1.2,'stroke-dasharray':'5 5',opacity:.7,'pointer-events':'none'},e);
+  const al=svg('text',{x:L+4,y:ya-5,fill:'#d6e6e4','font-size':10.5,'font-weight':700,'pointer-events':'none'},e);al.textContent=`avg ${Math.round(a)} ms`;
+  const ll=svg('text',{x:W-R,y:yy0(),'text-anchor':'end',fill:'#f0f8f6','font-size':11,'font-weight':700,'pointer-events':'none'},e);
+  function yy0(){return Math.max(T+10,y(g.at(-1))-6);} ll.textContent=Math.round(g.at(-1));
+  $('gctOld').textContent=`Step #${data[0].n}`;
+}
+
+// ============================ ROLL-OFF TIMELINE (svg) ============================
+function drawRoll(){
+  const e=$('rollChart');e.replaceChildren();const W=520,H=200,L=96,R=58,T=8,B=22,s=steps.at(-1);
+  const rowH=(H-T-B)/N;
+  SENSORS.forEach((p,i)=>{const yy=T+i*rowH+rowH/2;const t=svg('text',{x:L-10,y:yy+4,'text-anchor':'end',fill:'#c9e2e1','font-size':12,'font-weight':700},e);t.textContent=p.id;
+    svg('line',{x1:L,x2:W-R,y1:yy,y2:yy,stroke:'#1f363d','stroke-width':rowH-12,'stroke-linecap':'round'},e);});
+  if(!s){const t=svg('text',{x:(L+W-R)/2,y:H/2,'text-anchor':'middle',fill:'#799aa1','font-size':12},e);t.textContent='Waiting for a step';return;}
+  const x=ms=>L+(W-L-R)*Math.min(1,ms/s.gct);
+  [0,.25,.5,.75,1].forEach(f=>{const xx=L+(W-L-R)*f;svg('line',{x1:xx,x2:xx,y1:T,y2:H-B,stroke:'#2a444e','stroke-width':1,'stroke-dasharray':f%1?'2 4':''},e);const t=svg('text',{x:xx,y:H-6,'text-anchor':'middle',fill:'#6f8c94','font-size':10},e);t.textContent=Math.round(s.gct*f)+(f===1?' ms':'');});
+  const tip=$('rollTip');
+  SENSORS.forEach((p,i)=>{
+    const yy=T+i*rowH+rowH/2,hgt=rowH-12;
+    const pk=svg('text',{x:W-R+8,y:yy+4,fill:'#d6e6e4','font-size':12,'font-weight':700},e);pk.textContent=fmtPF(s.peaks[i])+' pF';
+    if(s.onT[i]===null){const t=svg('text',{x:L+8,y:yy+4,fill:'#6f8c94','font-size':11},e);t.textContent='not loaded';return;}
+    const x1=x(s.onT[i]),x2=Math.max(x1+4,x(s.offT[i]+10));
+    const r=svg('rect',{x:x1,y:yy-hgt/2,width:x2-x1,height:hgt,rx:4,fill:p.color},e);
+    r.addEventListener('mousemove',ev=>{const box=e.parentNode.getBoundingClientRect();tip.innerHTML=`<b>${p.id}</b> · ${p.cin}<br>Loaded <b>${Math.round(s.onT[i])}–${Math.round(s.offT[i]+10)} ms</b><br>Peak <b>${fmtPF(s.peaks[i])} pF</b>`;tip.style.display='block';tip.style.left=Math.min(ev.clientX-box.left+12,box.width-170)+'px';tip.style.top=(ev.clientY-box.top-62)+'px';});
+    r.addEventListener('mouseleave',()=>tip.style.display='none');
+  });
+}
+
+// ============================ PAD TABLE ============================
+$('padRows').innerHTML=SENSORS.map((s,i)=>`<tr><td><span class="sw" style="background:${s.color}"></span>${s.id}<small>${s.cin} · ${s.pin}</small></td><td><b id="tl${i}">0.00</b> pF<span class="minibar"><div id="tb${i}" style="background:${s.color}"></div></span></td><td id="tp${i}">--</td><td id="ta${i}">--</td><td id="ts${i}">--</td><td id="to${i}">--</td><td id="tc${i}">--</td></tr>`).join('');
+function updateTableSteps(){
+  const s=steps.at(-1),r=steps.slice(-10);
+  const tot=s?s.peaks.reduce((a,b)=>a+b,0):0;
+  for(let i=0;i<N;i++){
+    $('tp'+i).textContent=s?fmtPF(s.peaks[i])+' pF':'--';
+    $('ta'+i).textContent=r.length?fmtPF(mean(r.map(x=>x.peaks[i])))+' pF':'--';
+    $('ts'+i).textContent=s&&tot>0?Math.round(100*s.peaks[i]/tot)+' %':'--';
+    $('to'+i).textContent=s&&s.onT[i]!==null?Math.round(s.onT[i])+' ms':'--';
+    $('tc'+i).textContent=s&&s.durations[i]>0?Math.round(s.durations[i])+' ms':'--';
+  }
+}
+
+// ============================ SIGNAL TRACES (canvas) ============================
+$('traceLegend').innerHTML=SENSORS.map(s=>`<span><i style="background:${s.color}"></i>${s.id}</span>`).join('');
+const cv=$('trace'),ctx=cv.getContext('2d');let hoverX=null;
+cv.addEventListener('mousemove',e=>{hoverX=e.clientX-cv.getBoundingClientRect().left;});
+cv.addEventListener('mouseleave',()=>{hoverX=null;});
+function drawTrace(){
+  const w=cv.clientWidth,h=cv.clientHeight;if(!w||!h)return;sizeCanvas(cv,ctx,w,h);ctx.clearRect(0,0,w,h);
+  const L=40,B=4,T=8,pw=w-L-4,ph=h-T-B;
+  let max=500;trace.forEach(p=>{for(const v of p.v)if(v>max)max=v;});
+  const nice=[0.5,1,2,2.5,5,10,20,25,50];let topPF=nice.find(n=>n*1000>=max*1.08)||Math.ceil(max/10000)*10;const top=topPF*1000;
+  ctx.font="10px 'DM Sans',sans-serif";ctx.textAlign='right';
+  for(let k=0;k<=4;k++){const yy=T+ph*(1-k/4);ctx.strokeStyle=k?'#22393f':'#34545d';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(L,yy);ctx.lineTo(L+pw,yy);ctx.stroke();ctx.fillStyle='#6f8c94';ctx.fillText(String(+(topPF*k/4).toFixed(2)),L-6,yy+3);}
+  ctx.save();ctx.translate(10,T+ph/2);ctx.rotate(-Math.PI/2);ctx.textAlign='center';ctx.fillText('pF',0,0);ctx.restore();
+  if(trace.length<2)return;
+  const step=pw/499,o=L+(500-trace.length)*step;
+  ctx.fillStyle='rgba(189,239,103,.07)';trace.forEach((p,i)=>{if(p.c)ctx.fillRect(o+i*step,T,step+1,ph);});
+  for(let s=0;s<N;s++){ctx.beginPath();trace.forEach((p,i)=>{const x=o+i*step,y=T+ph*(1-p.v[s]/top);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.strokeStyle=SENSORS[s].color;ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();}
+  if(hoverX!==null&&hoverX>L){
+    const i=Math.round((hoverX-o)/step);if(i>=0&&i<trace.length){
+      const p=trace[i],x=o+i*step;ctx.strokeStyle='#d6e6e4';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke();
+      SENSORS.forEach((s,k)=>{const y=T+ph*(1-p.v[k]/top);ctx.fillStyle=s.color;ctx.strokeStyle='#0e1c24';ctx.lineWidth=2;ctx.beginPath();ctx.arc(x,y,4,0,7);ctx.fill();ctx.stroke();});
+      const bw=150,bh=20+N*16,bx=x+12+bw>w?x-12-bw:x+12,by=T+4;
+      ctx.fillStyle='#08161bf2';ctx.strokeStyle='#34545d';ctx.lineWidth=1;ctx.beginPath();ctx.roundRect(bx,by,bw,bh,7);ctx.fill();ctx.stroke();
+      ctx.textAlign='left';ctx.font="700 11px 'DM Sans',sans-serif";ctx.fillStyle='#90abb3';ctx.fillText(`${((trace.at(-1).t-p.t)/1000).toFixed(2)} s ago${p.c?' · contact':''}`,bx+10,by+15);
+      SENSORS.forEach((s,k)=>{const yy=by+31+k*16;ctx.fillStyle=s.color;ctx.fillRect(bx+10,yy-8,8,8);ctx.fillStyle='#f0f8f6';ctx.font="11px 'DM Sans',sans-serif";ctx.fillText(s.id,bx+24,yy);ctx.textAlign='right';ctx.font="700 11px 'DM Sans',sans-serif";ctx.fillText(fmtPF(p.v[k])+' pF',bx+bw-10,yy);ctx.textAlign='left';});
+    }
+  }
+}
+
+// ============================ RENDER LOOP ============================
+function render(){
+  for(let i=0;i<N;i++)smooth[i]+=(load[i]-smooth[i])*.35;
+  updateAutoScale();drawHeat();drawTrace();
+  // live contact box
+  const box=$('liveBox'),contactNow=stepOn&&!calRun;
+  box.classList.toggle('contact',contactNow);
+  $('phase').textContent=calRun?(calRun.onlyZero?'Zeroing':'Calibrating'):(lastT===null?'Waiting for data':(contactNow?'Ground contact':'Swing'));
+  if(lastT!==null&&!calRun){
+    const ms=contactNow?lastT-stepStart:(lastToeOffT!==null?lastT-lastToeOffT:null);
+    $('liveMs').textContent=ms===null?'--':Math.round(Math.min(ms,9999));
+    const ref=metrics().avg||300;$('liveBar').style.width=contactNow?Math.min(100,100*ms/(ref*1.3)).toFixed(1)+'%':'0%';
+  }
+  if(runStartT!==null&&lastT!==null){const s=Math.max(0,Math.floor((lastT-runStartT)/1000));$('runClock').textContent=`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;}
+  const S=Math.max(1,...SENSORS.map((_,i)=>peak[i]));
+  for(let i=0;i<N;i++){$('tl'+i).textContent=fmtPF(load[i]);$('tb'+i).style.width=Math.min(100,100*load[i]/scaleF()).toFixed(1)+'%';}
+  if(bleCharacteristic){const age=lastReceiveAt?performance.now()-lastReceiveAt:performance.now()-connectedAt,stale=age>2500,lab=stale?'BLE stream stalled':`BLE streaming · ${bleDropped} missed`;if($('statusText').textContent!==lab)setStatus(stale?'error':'live',lab);}
+  if(port&&!disconnecting){const age=lastReceiveAt?performance.now()-lastReceiveAt:performance.now()-connectedAt,stale=(lastReceiveAt&&age>1800)||(!lastReceiveAt&&age>5500),lab=stale?'No serial data':(lastReceiveAt?'XIAO streaming (USB)':'XIAO connected · checking');if($('statusText').textContent!==lab)setStatus(stale?'error':'live',lab);}
+  requestAnimationFrame(render);
+}
+
+// ============================ BLUETOOTH ============================
+const BLE_SERVICE='713d0001-5b8c-4e35-ae3f-5296c7420010',BLE_DATA='713d0002-5b8c-4e35-ae3f-5296c7420010';
+function onBLEData(ev){
+  const v=ev.target.value;if(!v||v.byteLength!==16)return;
+  const rawT=v.getUint32(0,true),vals=[];for(let i=0;i<5;i++)vals.push(v.getUint16(4+2*i,true));
+  const contact=v.getUint8(14),seq=v.getUint8(15);
+  if(bleLastSeq!==null)bleDropped+=(seq-bleLastSeq-1+256)%256;bleLastSeq=seq;
+  if(bleLastRawT!==null&&rawT<bleLastRawT&&bleLastRawT-rawT>0x80000000)bleTimestampBase+=4294967296;bleLastRawT=rawT;
+  processSample(bleTimestampBase+rawT,pickSlots(vals),contact);
+}
+function onBLEDisconnected(){if(bleCharacteristic)bleCharacteristic.removeEventListener('characteristicvaluechanged',onBLEData);bleCharacteristic=null;bleDevice=null;$('btnBLE').textContent='Connect Bluetooth';setStatus('','Bluetooth disconnected');notify('Bluetooth disconnected. Reconnect to keep going (steps so far are kept until New run).');}
+async function disconnectBLE(){if(bleDevice?.gatt?.connected)bleDevice.gatt.disconnect();else onBLEDisconnected();}
+async function connectBLE(){
+  if(bleConnecting)return;if(bleDevice){await disconnectBLE();return;}
+  if(!navigator.bluetooth){notify('Web Bluetooth is unavailable here. Use Chrome or Edge; if it is still blocked, serve this file from http://localhost.');return;}
+  bleConnecting=true;$('btnBLE').disabled=true;notify('');
+  try{
+    stopDemo();if(port)await disconnect();
+    const dev=await navigator.bluetooth.requestDevice({filters:[{services:[BLE_SERVICE]}]});
+    const server=await dev.gatt.connect(),service=await server.getPrimaryService(BLE_SERVICE),ch=await service.getCharacteristic(BLE_DATA);
+    await ch.startNotifications();
+    resetAll();zeroOff.fill(0);bleTimestampBase=0;bleLastRawT=null;bleLastSeq=null;bleDropped=0;
+    bleDevice=dev;bleCharacteristic=ch;dev.addEventListener('gattserverdisconnected',onBLEDisconnected,{once:true});ch.addEventListener('characteristicvaluechanged',onBLEData);
+    connectedAt=performance.now();$('btnBLE').textContent='Disconnect BLE';
+    $('hint').textContent='Receiving 16-byte BLE packets (firmware target 100 Hz). Watch the stream rate and missed-packet count; GCT resolution is one sample period (~10 ms).';
+    setStatus('live','BLE connected · waiting for data');
+  }catch(e){if(e.name!=='NotFoundError')notify('Bluetooth connection failed: '+e.message);}
+  finally{bleConnecting=false;$('btnBLE').disabled=false;}
+}
+
+// ============================ USB SERIAL ============================
+let badLines=0,goodLines=0,lastBad='';
+function parseLine(line){
+  if(!line||line[0]==='#'||line.startsWith('t_ms'))return;
+  const p=line.split(',').map(s=>s.trim());
+  if(p.length>=FW_SLOTS+2&&p.slice(0,FW_SLOTS+2).every(s=>s!==''&&Number.isFinite(Number(s)))){
+    goodLines++;if(badLines){badLines=0;if($('message').textContent.startsWith('Serial text'))notify('');}
+    processSample(Number(p[0]),pickSlots(p.slice(1,FW_SLOTS+1).map(Number)),Number(p[FW_SLOTS+1])>0?1:0);return;
+  }
+  badLines++;lastBad=line.slice(0,80);
+  if(badLines===15){
+    const plot=/[A-Za-z]+\s*:/.test(line);
+    notify(`Serial text is arriving but it is not the dashboard CSV (t_ms,S1,S2,S3,S4,S5,contact). Example line: "${lastBad}". `+
+      (plot?'This looks like Serial Plotter output: set plotMode = false in the sketch and upload again.':'Check the sketch prints the dashboard CSV at 115200 baud.'));
+  }
+}
+async function readSerial(activePort){
+  const dec=new TextDecoder();let buf='';
+  try{reader=activePort.readable.getReader();
+    while(true){const {value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});let ix;while((ix=buf.indexOf('\n'))>=0){parseLine(buf.slice(0,ix).trim());buf=buf.slice(ix+1);}if(buf.length>4096)buf='';}
+  }catch(e){if(!disconnecting)notify('Serial connection interrupted: '+e.message);}
+  finally{if(reader){try{reader.releaseLock();}catch{}reader=null;}try{await activePort.close();}catch{}
+    if(port===activePort){port=null;setStatus('','Disconnected');$('btnConnect').textContent='Connect USB';}readTask=null;disconnecting=false;}
+}
+async function disconnect(){if(!port)return;disconnecting=true;$('btnConnect').disabled=true;try{if(reader)await reader.cancel();if(readTask)await readTask;}catch(e){notify('Disconnect issue: '+e.message);}finally{$('btnConnect').disabled=false;}}
+async function connect(){
+  if(connecting)return;if(bleDevice)await disconnectBLE();if(port){await disconnect();return;}
+  if(!('serial' in navigator)){notify('Web Serial needs Chrome or Edge.');return;}
+  connecting=true;$('btnConnect').disabled=true;notify('');
+  try{stopDemo();const chosen=await navigator.serial.requestPort();await chosen.open({baudRate:115200});
+    port=chosen;resetAll();zeroOff.fill(0);connectedAt=performance.now();setStatus('live','XIAO connected · checking');$('btnConnect').textContent='Disconnect USB';
+    $('hint').textContent='USB stream at 115200. Do not send d (diagnostics) from another tool while connected — it replaces the CSV lines.';readTask=readSerial(chosen);
+  }catch(e){if(e.name!=='NotFoundError')notify('Could not connect: '+e.message+' Close the Arduino Serial Monitor/Plotter, then retry.');if(!port){setStatus('','Not connected');$('btnConnect').textContent='Connect USB';}}
+  finally{connecting=false;$('btnConnect').disabled=false;}
+}
+
+// ============================ CALIBRATION (same as 11/08) ============================
+const CAL_INFO={1:{step:1,color:'#54a8ff',head:'Keep the foot lifted',sub:'Relax the foot in the air and keep it still. Measuring each pad’s zero.'},
+  2:{step:2,color:'#bdef67',head:'Stand on this foot',sub:'Put your full weight on it and stay still. Measuring each pad’s full-load level.'},
+  3:{step:3,color:'#ff805f',head:'Lift the foot now',sub:'Lift it clearly off the floor and hold it up.'}};
+const FAIL_TEXT={1:'No load was detected while standing. Check the insole is under the foot, then try again.',2:'The foot lifting wasn’t detected within 6 s. Lift the foot clearly off the floor when the screen says so.',3:'No data is arriving from the insole. Check the connection, then try again.'};
+function streaming(){return (bleCharacteristic||port)&&lastReceiveAt&&performance.now()-lastReceiveAt<1500;}
+function newCal(onlyZero){return {onlyZero,phase:1,t0:null,acc:Array(N).fill(0),acc2:Array(N).fill(0),noise:Array(N).fill(0),n:0,stand:null,standSum:0,flags:null,liftT:null,relFrac:Array(N).fill(0),relMs:Array(N).fill(null),sampled:false,endT:null,dur:CALT.ZERO,startedAt:performance.now()};}
+function nextPhase(p,t){const c=calRun;c.phase=p;c.t0=t;c.acc=Array(N).fill(0);c.n=0;c.dur=p===1?CALT.ZERO:p===2?CALT.STAND:CALT.LIFT_WAIT;c.endT=t+c.dur;showPhase();}
+function calSample(t,v,total,raw){
+  const c=calRun;if(c.t0===null){c.t0=t;c.endT=t+c.dur;showPhase();}
+  const el=t-c.t0;
+  if(c.phase===1){
+    for(let i=0;i<N;i++){c.acc[i]+=raw[i];c.acc2[i]+=raw[i]*raw[i];}c.n++;
+    if(el>=CALT.ZERO){
+      zeroOff=c.acc.map(a=>a/c.n);c.noise=c.acc2.map((q,i)=>Math.sqrt(Math.max(0,q/c.n-zeroOff[i]*zeroOff[i])));
+      if(c.onlyZero&&calNoise){calNoise=c.noise.slice();calFloor=calNoise.map(sd=>Math.max(15,4*sd));}
+      if(c.onlyZero){calRun=null;notify('Zero updated. Each pad now reads 0 with the foot lifted.');setTimeout(()=>{if($('message').textContent.startsWith('Zero updated'))notify('');},4000);return;}
+      nextPhase(2,t);
+    }
+  }else if(c.phase===2){
+    if(el>=CALT.SETTLE){for(let i=0;i<N;i++)c.acc[i]+=v[i];c.n++;}
+    if(el>=CALT.STAND){c.stand=c.acc.map(a=>c.n?a/c.n:0);c.standSum=c.stand.reduce((a,b)=>a+b,0);c.flags=c.stand.map(s=>(s<40?1:0));if(c.standSum<100){calFail(1);return;}nextPhase(3,t);}
+  }else if(c.phase===3){
+    if(c.liftT===null){if(total<c.standSum/2){c.liftT=t;c.dur=CALT.HOLD;c.endT=t+CALT.HOLD;showPhase();}else if(el>=CALT.LIFT_WAIT){calFail(2);return;}}
+    else{const s=t-c.liftT;
+      for(let i=0;i<N;i++)if(c.relMs[i]===null&&v[i]<0.10*c.stand[i]+SENSOR_FLOOR_FF)c.relMs[i]=s;
+      if(!c.sampled&&s>=CALT.REL_AT){c.sampled=true;c.relFrac=v.map((x,i)=>c.stand[i]>0?Math.min(1,x/c.stand[i]):0);
+        c.relFrac.forEach((r,i)=>{if(!(c.flags[i]&1)&&r>STUCK_FRAC)c.flags[i]|=16;else if(!(c.flags[i]&1)&&r>0.25)c.flags[i]|=2;});}
+      if(s>=CALT.HOLD)calFinish();}
+  }
+}
+function calFinish(){
+  const c=calRun;
+  relLevel=c.relFrac.map((r,i)=>(c.flags[i]&1)?0.10:Math.min(0.60,Math.max(0.10,r+0.05)));
+  calNoise=c.noise.slice();calUse=c.flags.map(f=>!(f&16));
+  calRange=c.stand.map((s,i)=>Math.max(s,6*calNoise[i],MIN_RANGE_FF));
+  calFloor=calNoise.map(sd=>Math.max(15,4*sd));
+  sOnLvl=calRange.map((r,i)=>Math.max(calFloor[i],0.25*r));sOffLvl=calRange.map((r,i)=>Math.max(0.75*calFloor[i],0.15*r));
+  for(let i=0;i<N;i++)peak[i]=calRange[i];
+  calResults=SENSORS.map((_,i)=>({noise:calNoise[i],stand:c.stand[i],rel:c.relFrac[i],relMs:c.relMs[i]===null?CALT.HOLD:c.relMs[i],flags:c.flags[i]}));
+  calRun=null;webContactReset();calLastTime=new Date();
+  $('calPill').textContent='Calibrated '+calLastTime.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});$('calPillBox').className='pill calok';
+  setCalView('done','Calibration complete','Toe-off now uses each pad’s own release level. Press New run before you start running. Re-run after moving the insole or re-lacing.','✓');
+  renderCalResults();
+}
+function calFail(reason){const z=calRun&&calRun.onlyZero;calRun=null;webContactReset();if(z){notify(FAIL_TEXT[reason]);return;}setCalView('error','Calibration didn’t finish',FAIL_TEXT[reason]||'Please try again.','!');}
+function setStepClasses(step){for(let k=1;k<=3;k++){const e=$('cs'+k);e.classList.toggle('active',k===step);e.classList.toggle('done',k<step);}}
+function setCalView(kind,head,sub,count){
+  $('calHead').textContent=head;$('calSub').textContent=sub;$('calCount').textContent=count===undefined?'·':count;
+  if(kind!=='run'){setStepClasses(kind==='done'?4:0);$('calBar').style.width=kind==='done'?'100%':'0';}
+  const running=!!(calRun&&!calRun.onlyZero);
+  $('calStart').textContent=kind==='done'?'Run again':(kind==='error'?'Try again':'Start calibration');$('calStart').style.display=running?'none':'';$('calCancel').textContent=running?'Cancel':'Close';
+  const card=document.querySelector('.calCard');if(kind==='error')card.style.setProperty('--phase','#ff805f');if(kind==='done')card.style.setProperty('--phase','#bdef67');if(kind==='intro')card.style.setProperty('--phase','#54d9d0');
+}
+function showPhase(){const c=calRun;if(!c||c.onlyZero)return;const info=CAL_INFO[c.phase];document.querySelector('.calCard').style.setProperty('--phase',info.color);setStepClasses(info.step);
+  if(c.phase===3&&c.liftT!==null)setCalView('run','Hold it up…','Lift detected. Keep the foot up while each pad’s release is measured.');else setCalView('run',info.head,info.sub);}
+function openCal(){stopDemo();$('calOverlay').classList.add('open');if(!calRun){$('calResults').innerHTML='';setCalView('intro','Before you start','Put the shoe on and lace it as you will run. Stand next to something to hold on to, and keep the insole connected (data must be streaming).');}}
+function closeCal(){if(calRun&&!calRun.onlyZero)return;$('calOverlay').classList.remove('open');}
+function startCal(){if(!streaming()){setCalView('error','No data from the insole',FAIL_TEXT[3],'!');return;}calResults=[];$('calResults').innerHTML='';calRun=newCal(false);document.querySelector('.calCard').style.setProperty('--phase',CAL_INFO[1].color);setStepClasses(1);setCalView('run',CAL_INFO[1].head,CAL_INFO[1].sub,'3');}
+function cancelCal(){if(calRun&&!calRun.onlyZero){calRun=null;webContactReset();setCalView('intro','Calibration cancelled','The previous calibration (if any) is still in use.');return;}closeCal();}
+function zeroNow(){if(calRun)return;if(!streaming()){notify('Connect the insole first; Zero needs live data.');return;}calRun=newCal(true);notify('Zeroing: keep the foot lifted and still for 3 seconds…');}
+function renderCalResults(){
+  const rows=SENSORS.map((s,i)=>{const r=calResults[i];if(!r)return `<tr><td>${s.id}</td><td colspan="5">no data</td></tr>`;
+    const issues=[];if(r.flags&16)issues.push('stuck after loading — ignored for toe-off');if(r.flags&1)issues.push('weak');if(r.flags&2)issues.push('slow release');
+    return `<tr><td>${s.id} · ${s.cin}</td><td>${fmtPF(r.stand)} pF</td><td>${(r.noise/1000).toFixed(3)} pF</td><td>${Math.round(r.rel*100)}%</td><td>${r.relMs>=CALT.HOLD?'>'+CALT.HOLD:Math.round(r.relMs)} ms</td><td class="${issues.length?'warn':'ok'}">${issues.length?'⚠ '+issues.join(', '):'✓ OK'}</td></tr>`;}).join('');
+  $('calResults').innerHTML=`<table class="calTable"><thead><tr><th>Pad</th><th>ΔC standing</th><th>Noise (SD)</th><th>Left after 50 ms</th><th>Release</th><th>Check</th></tr></thead><tbody>${rows}</tbody></table>
+  <div class="calNote"><b>ΔC standing</b> = how much each pad’s capacitance rises under body weight. <b>Noise</b> = standard deviation with the foot lifted; the map hides readings under 4× this. <b>Weak</b> = barely loaded when standing (normal for the arch). <b>Slow release</b> = check that pad’s mounting. <b>Stuck</b> = the pad stayed near its standing reading after lifting, so it is not used for toe-off.</div>`;
+}
+function calTick(){if(calRun){if(performance.now()-lastReceiveAt>1500&&performance.now()-calRun.startedAt>1500)calFail(3);
+  else if(!calRun.onlyZero&&calRun.endT!==null&&lastT!==null){const left=Math.max(0,calRun.endT-lastT);$('calCount').textContent=Math.ceil(left/1000);$('calBar').style.width=(100*(1-left/Math.max(1,calRun.dur))).toFixed(1)+'%';}}
+  requestAnimationFrame(calTick);}
+
+// ============================ DEMO RUN ============================
+// windows (fraction of contact) and amplitudes per pad, in SENSORS order: big toe, 1st met, 5th met, lat mid, heel
+const DEMO_ALL=[[[.55,1],[.35,.95],[.3,.92],[.12,.7],[0,.45]],[[.5,1],[.18,.95],[.12,.92],[0,.75],[.2,.5]],[[.45,1],[.05,.94],[0,.9],[.1,.7],[.4,.55]]];
+const DEMO_AMP_ALL=[1400,2600,1900,900,3200];
+const DEMO_KEEP=[0,1,2,3,4].filter(i=>FIVE_PADS||i!==3);
+const DEMO_WIN=DEMO_ALL.map(w=>DEMO_KEEP.map(i=>w[i])),DEMO_AMP=DEMO_KEEP.map(i=>DEMO_AMP_ALL[i]);
+const shape=(ph,a,b)=>ph<a||ph>b?0:Math.pow(Math.sin(Math.PI*(ph-a)/(b-a)),1.4);
+let demoStepT=0,demoStride=714,demoGct=250,demoStrike=0;
+async function toggleDemo(){
+  if(demoTimer){stopDemo();setStatus('','Not connected');return;}
+  if(port)await disconnect();if(bleDevice)await disconnectBLE();
+  resetAll();notify('');demoT=0;demoStepT=-1000;
+  $('btnDemo').textContent='Stop demo';$('hint').textContent='Simulated running data (≈168 spm, mostly heel strike, slowly drifting GCT). No insole is connected.';setStatus('demo','Simulated run');
+  demoTimer=setInterval(()=>{for(let k=0;k<2;k++){demoT+=10;
+    if(demoT-demoStepT>=demoStride){demoStepT=demoT;const drift=20*Math.sin(demoT/40000);demoGct=235+drift+Math.random()*30;demoStride=700+Math.random()*40;const r=Math.random();demoStrike=r<.6?0:r<.85?1:2;}
+    const ph=(demoT-demoStepT)/demoGct;
+    processSample(demoT,DEMO_AMP.map((A,i)=>{const [a,b]=DEMO_WIN[demoStrike][i];return Math.round(A*shape(ph,a,b)*(.9+Math.random()*.2)+Math.random()*25);}),null);}},20);
+}
+function stopDemo(){if(demoTimer)clearInterval(demoTimer);demoTimer=null;$('btnDemo').textContent='Demo run';}
+
+// ============================ EXPORT ============================
+function download(text,name){const blob=new Blob([text],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);}
+const stamp=()=>(demoTimer?'demo':'live')+'_'+new Date().toISOString().replace(/[:.]/g,'-');
+function exportCSV(){if(!history.length)return;download('t_ms,'+SENSORS.map(s=>(s.id+'_'+s.cin+'_fF').replace(/[\s.]/g,'')).join(',')+',contact\n'+history.map(r=>r.join(',')).join('\n')+'\n','kynetix_samples_'+stamp()+'.csv');}
+function exportSteps(){
+  if(!steps.length)return;
+  const tag=s=>s.id.replace(/[\s.]/g,'');
+  const head=['step','start_ms','gct_ms','stride_ms','flight_est_ms','duty_pct','strike','touchdown_pad','toeoff_pad',...SENSORS.map(s=>tag(s)+'_peak_pF'),...SENSORS.map(s=>tag(s)+'_on_ms'),...SENSORS.map(s=>tag(s)+'_off_ms'),...SENSORS.map(s=>tag(s)+'_contact_ms')];
+  const rows=steps.map(s=>[s.n,Math.round(s.start),Math.round(s.gct),s.stride?Math.round(s.stride):'',s.stride?Math.round(s.stride/2-s.gct):'',s.stride?(100*s.gct/s.stride).toFixed(1):'',s.first<0?'unclassified':SENSORS[s.first].region,s.first<0?'':SENSORS[s.first].id,s.toe<0?'':SENSORS[s.toe].id,
+    ...s.peaks.map(p=>(p/1000).toFixed(3)),...s.onT.map(x=>x===null?'':Math.round(x)),...s.offT.map(x=>x===null?'':Math.round(x+10)),...s.durations.map(Math.round)].join(','));
+  download(head.join(',')+'\n'+rows.join('\n')+'\n','kynetix_steps_'+stamp()+'.csv');
+}
+
+// ============================ EVENTS ============================
+function segBind(id,cb){$(id).addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;[...$(id).children].forEach(x=>x.classList.toggle('on',x===b));cb(b.dataset.v);});}
+segBind('segView',v=>mapView=v);segBind('segScale',v=>mapScale=v);
+$('btnConnect').addEventListener('click',connect);$('btnBLE').addEventListener('click',connectBLE);$('btnDemo').addEventListener('click',toggleDemo);
+$('btnReset').addEventListener('click',()=>{resetAll();notify('');});$('btnExport').addEventListener('click',exportCSV);$('btnExportSteps').addEventListener('click',exportSteps);
+$('btnCal').addEventListener('click',openCal);$('btnZero').addEventListener('click',zeroNow);$('calStart').addEventListener('click',startCal);$('calCancel').addEventListener('click',cancelCal);$('calClose').addEventListener('click',closeCal);
+$('calOverlay').addEventListener('click',e=>{if(e.target===$('calOverlay'))closeCal();});document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCal();});
+resetAll();requestAnimationFrame(render);requestAnimationFrame(calTick);
+</script>
+</body>
+</html>
